@@ -120,27 +120,27 @@ class OmniDrawPlugin(Star):
             Plain(f"\n{MessageEmoji.SUCCESS} 拍好啦！")
         ])
 
-    # ==========================================
+   # ==========================================
     # 🌟 核心新功能：大模型自然语言绘图工具
     # ==========================================
-    @llm_tool(name="generate_image", description="AI 绘图生成器。当用户请求画图、生成图片或提出明确的画面描述要求你画出来时，必须调用此工具。传入的 prompt 必须是你根据用户需求扩写并翻译成英文的高质量正向提示词。")
+    @llm_tool(name="generate_image", description="AI 绘图生成器。当用户请求画图、生成图片或提出明确的画面描述要求你画出来时，必须调用此工具。")
     async def tool_generate_image(self, event: AstrMessageEvent, prompt: str) -> AsyncGenerator[Any, None]:
         """
         供大语言模型调用的画图接口。
+        
+        Args:
+            prompt (string): 你根据用户需求扩写并翻译成英文的高质量提示词。必须是英文，包含画面主体、环境、光影、画风等丰富细节。
         """
         logger.info(f"🧠 [LLM Tool] 触发自然语言画图！模型生成的提示词: {prompt}")
         
         try:
-            # 告诉用户大模型已经响应了画图请求
             yield event.plain_result(f"{MessageEmoji.PAINTING} 好的，我马上为你作画，请稍等片刻...")
             
-            # 直接复用我们写好的、带兜底重试逻辑的画图调度器
             image_url = await self.chain_manager.run_chain("text2img", prompt)
             
-            # 返回图片和完成语
             yield event.chain_result([
                 Image.fromURL(image_url),
-                Plain(f"\n{MessageEmoji.SUCCESS} 铛铛！为你画好啦！")
+                Plain(f"\n{MessageEmoji.SUCCESS} 铛铛！为你画好啦！\n(Prompt: {prompt})")
             ])
             
         except Exception as e:
