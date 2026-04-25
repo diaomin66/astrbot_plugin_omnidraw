@@ -1,15 +1,21 @@
 {
+  "ref_images_pool": {
+    "description": "🖼️ 全局参考图库 (请在此处统一点击上传你的所有参考图)",
+    "type": "file",
+    "default": [],
+    "file_types": ["png", "jpg", "jpeg", "webp"]
+  },
   "providers": {
-    "description": "🔌 API 节点配置 (支持多节点兜底与密钥轮询)",
+    "description": "🔌 API 节点配置",
     "type": "template_list",
     "items": {
       "type": "object",
       "keys": {
-        "id": { "description": "节点ID (如: node_1)", "type": "string", "default": "node_1" },
+        "id": { "description": "节点ID", "type": "string", "default": "node_1" },
         "api_type": { "description": "接口模式", "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
         "base_url": { "description": "接口地址", "type": "string", "default": "https://api.openai.com/v1" },
-        "api_keys": { "description": "密钥池 (一行一个，自动轮询)", "type": "text", "default": "" },
-        "model": { "description": "模型名称 (如: dall-e-3)", "type": "string", "default": "dall-e-3" },
+        "api_keys": { "description": "密钥池 (一行一个)", "type": "text", "default": "" },
+        "model": { "description": "模型名称", "type": "string", "default": "dall-e-3" },
         "timeout": { "description": "超时时间 (秒)", "type": "string", "default": "60" }
       }
     },
@@ -17,36 +23,28 @@
       "openai_node": {
         "name": "➕ 添加 API 节点",
         "items": {
-          "id": { "description": "节点ID (如: node_1)", "type": "string", "default": "node_1" },
+          "id": { "description": "节点ID", "type": "string", "default": "node_1" },
           "api_type": { "description": "接口模式", "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
           "base_url": { "description": "接口地址", "type": "string", "default": "https://api.openai.com/v1" },
-          "api_keys": { "description": "密钥池 (一行一个，自动轮询)", "type": "text", "default": "sk-xxxxxx" },
-          "model": { "description": "模型名称 (如: dall-e-3)", "type": "string", "default": "dall-e-3" },
-          "timeout": { "description": "超时时间 (秒)", "type": "string", "default": "60" }
+          "api_keys": { "description": "密钥池", "type": "text", "default": "sk-xxxxxx" },
+          "model": { "description": "模型名称", "type": "string", "default": "dall-e-3" },
+          "timeout": { "description": "超时时间", "type": "string", "default": "60" }
         }
       }
     },
     "default": []
   },
-  "chain_text2img": {
-    "description": "🎨 常规画图链路 (填节点ID，按逗号分隔，如: node_1,node_2)",
-    "type": "string",
-    "default": "node_1"
-  },
-  "chain_selfie": {
-    "description": "🤳 自拍/参考图链路 (必须填支持改图的节点ID)",
-    "type": "string",
-    "default": "node_1"
-  },
+  "chain_text2img": { "description": "🎨 常规画图链路 (如: node_1)", "type": "string", "default": "node_1" },
+  "chain_selfie": { "description": "🤳 自拍/参考图链路", "type": "string", "default": "node_1" },
   "personas": {
-    "description": "🎭 人设库 (支持直接上传本地图片作为参考)",
+    "description": "🎭 人设库 (在此配置人设，并将图库中的【文件名】填入下方)",
     "type": "template_list",
     "items": {
       "type": "object",
       "keys": {
         "name": { "description": "人设名称", "type": "string", "default": "" },
         "base_prompt": { "description": "基础提示词 (英文正向)", "type": "text", "default": "" },
-        "ref_image_url": { "description": "参考图 (点击上传)", "type": "file", "default": "" }
+        "ref_image_name": { "description": "绑定的图库文件名 (如: avatar.png，留空则无)", "type": "string", "default": "" }
       }
     },
     "templates": {
@@ -54,8 +52,8 @@
         "name": "➕ 添加人设",
         "items": {
           "name": { "description": "人设名称", "type": "string", "default": "默认人设" },
-          "base_prompt": { "description": "基础提示词 (英文正向)", "type": "text", "default": "masterpiece, best quality" },
-          "ref_image_url": { "description": "参考图 (点击上传)", "type": "file", "default": "" }
+          "base_prompt": { "description": "基础提示词", "type": "text", "default": "masterpiece, best quality" },
+          "ref_image_name": { "description": "绑定的图库文件名", "type": "string", "default": "" }
         }
       }
     },
