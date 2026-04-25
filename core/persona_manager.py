@@ -1,6 +1,6 @@
 """
-AstrBot 万象画卷插件 v1.7.2
-功能描述：人设库管理与人设 Prompt 构造服务 (修复相对路径判定问题)
+AstrBot 万象画卷插件 v1.7.4
+功能描述：人设库管理与人设 Prompt 构造服务 (本地图库极速版 - 致敬你的完美思路)
 """
 
 from typing import Tuple, Dict, Any, Optional
@@ -8,9 +8,18 @@ import os
 from astrbot.api import logger
 from ..models import PluginConfig, PersonaConfig
 
+# 获取当前文件所在目录 (core) 的上一级，也就是插件的根目录
+PLUGIN_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# 按照你的思路，在插件内部定义一个专属的图片文件夹
+LOCAL_IMAGE_DIR = os.path.join(PLUGIN_ROOT, "images")
+
 class PersonaManager:
     def __init__(self, config: PluginConfig):
         self.config = config
+        # 初始化时，如果不存在这个文件夹，就自动帮你建好
+        if not os.path.exists(LOCAL_IMAGE_DIR):
+            os.makedirs(LOCAL_IMAGE_DIR, exist_ok=True)
+            logger.info(f"📁 已自动创建插件专属本地图库: {LOCAL_IMAGE_DIR}")
 
     def get_persona(self, name: str) -> Optional[PersonaConfig]:
         for p in self.config.personas:
@@ -44,47 +53,48 @@ class PersonaManager:
         
         extra_kwargs = {}
         
-        # 🌟 智能雷达：去全局图库池中匹配绝对路径
         if persona.ref_image_name:
-            matched_path = None
+            real_path = None
+            target_filename = persona.ref_image_name.strip()
             
-            logger.info(f"🔍 正在图库池 (当前总计 {len(self.config.ref_images_pool)} 张图) 中匹配关键字 '{persona.ref_image_name}'...")
-            
-            for path in self.config.ref_images_pool:
-                file_name = os.path.basename(path).lower()
-                if persona.ref_image_name.lower() in file_name:
-                    matched_path = path
-                    break
-            
-            if matched_path:
-                # 【核心修复】：智能补全绝对路径，解决 AstrBot 返回相对路径导致判定失败的问题
-                real_path = matched_path
-                # 尝试不同的前缀路径 (当前目录, 或 data 目录)
-                possible_prefixes = ["", "data"]
-                
-                for prefix in possible_prefixes:
-                    # 如果不是绝对路径，就进行组装尝试
-                    if not os.path.isabs(matched_path):
-                        test_path = os.path.abspath(os.path.join(os.getcwd(), prefix, matched_path))
-                    else:
-                        test_path = matched_path
-                        
-                    if os.path.exists(test_path):
-                        real_path = test_path
+            # ==========================================
+            # 🚀 策略 1：本地专属图库极速直读 (你的方案)
+            # ==========================================
+            local_guess_path = os.path.join(LOCAL_IMAGE_DIR, target_filename)
+            if os.path.exists(local_guess_path):
+                real_path = local_guess_path
+                logger.info(f"⚡ [极速加载] 从插件本地图库瞬间找到图片: {real_path}")
+
+            # ==========================================
+            # 🔍 策略 2：定向解析 WebUI 缓存 (精准打击，拒绝全盘扫描)
+            # ==========================================
+            if not real_path:
+                for path in self.config.ref_images_pool:
+                    if target_filename.lower() in os.path.basename(path).lower():
+                        # AstrBot 常见的几个相对路径基准点
+                        possible_bases = [
+                            os.getcwd(),                                      # 运行根目录
+                            os.path.join(os.getcwd(), "data"),                # 标准 data 目录
+                            os.path.abspath(os.path.join(PLUGIN_ROOT, "../../..")) # 从插件目录反推 AstrBot Core 目录
+                        ]
+                        for base in possible_bases:
+                            test_path = os.path.join(base, path)
+                            if os.path.exists(test_path):
+                                real_path = test_path
+                                logger.info(f"✅ 从 WebUI 缓存精准定位图片: {real_path}")
+                                break
                         break
-                        
-                if os.path.exists(real_path):
-                    extra_kwargs["ref_image_path_or_url"] = real_path
-                    logger.info(f"✅ 成功从全局图库匹配到人设物理文件: {real_path}")
-                else:
-                    # 兜底：强行塞进去，让底层 Provider 抛出更详细的文件未找到错误
-                    logger.warning(f"⚠️ 找到了名字匹配的路径 '{matched_path}'，但磁盘上检测不到该文件。将强行尝试加载...")
-                    extra_kwargs["ref_image_path_or_url"] = matched_path
+
+            # ==========================================
+            # 🏁 最终结算
+            # ==========================================
+            if real_path and os.path.exists(real_path):
+                extra_kwargs["ref_image_path_or_url"] = real_path
             else:
                 if persona.ref_image_name.startswith("http"):
                     extra_kwargs["ref_image_path_or_url"] = persona.ref_image_name
                     logger.info(f"✅ 识别为网络 URL 参考图: {persona.ref_image_name}")
                 else:
-                    logger.warning(f"⚠️ 匹配失败！当前图库池的实际内容为: {self.config.ref_images_pool}")
+                    logger.warning(f"⚠️ 找不到图片 '{target_filename}'！\n💡 建议: 请直接将图片复制到插件的 images 文件夹 ({LOCAL_IMAGE_DIR}) 下。")
 
         return final_prompt, extra_kwargs
