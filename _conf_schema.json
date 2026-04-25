@@ -10,23 +10,59 @@
           "api_type": "openai_image",
           "base_url": "https://api.openai.com/v1",
           "api_keys": "sk-xxxxxx",
-          "model": "dall-e-3"
+          "model": "dall-e-3",
+          "timeout": 60
         }
       }
     },
     "items": {
       "type": "object",
       "keys": {
-        "id": { "type": "string", "default": "main_node" },
-        "api_type": { "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
-        "base_url": { "type": "string", "default": "https://api.openai.com/v1" },
-        "api_keys": { "type": "text", "default": "" },
-        "model": { "type": "string", "default": "dall-e-3" }
+        "id": {
+          "description": "提供商唯一ID (例如: main_node)",
+          "type": "string",
+          "default": "main_node"
+        },
+        "api_type": {
+          "description": "接口类型",
+          "type": "string",
+          "options": ["openai_image", "openai_chat"],
+          "default": "openai_image"
+        },
+        "base_url": {
+          "description": "接口地址 (如: https://api.openai.com/v1)",
+          "type": "string",
+          "default": "https://api.openai.com/v1"
+        },
+        "api_keys": {
+          "description": "API 密钥轮询池 (按回车换行，自动轮换)",
+          "type": "text",
+          "default": "sk-xxxxxx"
+        },
+        "model": {
+          "description": "模型名称 (如: dall-e-3, banana)",
+          "type": "string",
+          "default": "dall-e-3"
+        },
+        "timeout": {
+          "description": "请求超时时间 (秒)。如果画图较慢请调大此值，如 120",
+          "type": "number",
+          "default": 60
+        }
       }
-    }
+    },
+    "default": []
   },
-  "chain_text2img": { "type": "string", "default": "main_node" },
-  "chain_selfie": { "type": "string", "default": "main_node" },
+  "chain_text2img": {
+    "description": "文生图兜底链路 (按顺序尝试节点ID，用英文逗号分隔)",
+    "type": "string",
+    "default": "main_node"
+  },
+  "chain_selfie": {
+    "description": "自拍模式兜底链路 (按顺序尝试节点ID，用英文逗号分隔)",
+    "type": "string",
+    "default": "main_node"
+  },
   "personas": {
     "description": "人设库。图片支持使用指令 /设置人设图片 上传，也可在此填入本地绝对路径或URL。",
     "type": "template_list",
@@ -43,10 +79,23 @@
     "items": {
       "type": "object",
       "keys": {
-        "name": { "description": "人设名称", "type": "string", "default": "默认人设" },
-        "base_prompt": { "description": "人设固定描述提示词", "type": "text", "default": "" },
-        "ref_image_url": { "description": "参考图路径。若使用本地文件，填入绝对路径。", "type": "string", "default": "" }
+        "name": {
+          "description": "人设名称",
+          "type": "string",
+          "default": "默认人设"
+        },
+        "base_prompt": {
+          "description": "人设固定描述提示词",
+          "type": "text",
+          "default": ""
+        },
+        "ref_image_url": {
+          "description": "参考图路径。若使用本地文件，填入绝对路径。",
+          "type": "string",
+          "default": ""
+        }
       }
-    }
+    },
+    "default": []
   }
 }
