@@ -1,12 +1,6 @@
 """
-AstrBot 万象画卷插件 v1.0.0
-
-功能描述：
-- 兜底链路调度器
-
-作者: your_name
-版本: 1.0.0
-日期: 2026-04-25
+AstrBot 万象画卷插件 v1.1.0
+功能描述：兜底链路调度器
 """
 
 import aiohttp
@@ -16,40 +10,37 @@ from ..models import PluginConfig
 from ..providers import create_provider
 
 class ChainManager:
-    """负责管理 Provider 的流转和失败重试逻辑"""
-    
     def __init__(self, config: PluginConfig, session: aiohttp.ClientSession):
         self.config = config
         self.session = session
 
     async def run_chain(self, chain_name: str, prompt: str, **kwargs: Any) -> str:
-        """按照配置好的链路顺序执行画图任务"""
         chain = self.config.chains.get(chain_name)
         if not chain:
-            raise ValueError(f"未找到对应的链路配置: {chain_name}，请在 WebUI 中配置。")
+            raise ValueError(f"未找到链路配置: {chain_name}")
 
         last_error = None
         
         for provider_id in chain:
-            provider_config = self.config.get_provider_by_id(provider_id)
+            # 【关键修复】把 get_provider_by_id 改成了 get_provider
+            provider_config = self.config.get_provider(provider_id)
             if not provider_config:
-                logger.warning(f"链路 [{chain_name}] 中节点 [{provider_id}] 不存在，已跳过。")
+                logger.warning(f"⚠️ 链路 [{chain_name}] 中的节点 [{provider_id}] 不存在。")
                 continue
 
-            logger.info(f"🎨 尝试使用节点 [{provider_id}] 进行创作...")
+            logger.info(f"🚀 [Chain] 正在将任务交由节点 [{provider_id}] 处理...")
             try:
-                # 工厂实例化 Provider
                 provider = create_provider(provider_config, self.session)
-                
-                # 执行请求并添加超时控制
                 result = await provider.generate_image(prompt, **kwargs)
-                
-                logger.info(f"✅ 节点 [{provider_id}] 创作成功！")
+                logger.info(f"✅ [Chain] 节点 [{provider_id}] 创作成功！")
                 return result
                 
             except Exception as e:
-                last_error = e
-                logger.error(f"❌ 节点 [{provider_id}] 失败: {str(e)}。切换下一个...")
+                # 增强日志捕获
+                error_detail = repr(e)
+                last_error = error_detail
+                logger.error(f"❌ [Chain] 节点 [{provider_id}] 发生异常: {error_detail}", exc_info=True)
+                logger.warning(f"🔄 正在尝试切换到下一个备用节点...")
                 continue
 
-        raise RuntimeError(f"链路 [{chain_name}] 所有节点均失败！最后错误: {last_error}")
+        raise RuntimeError(f"所有节点均已阵亡！最后一次报错内容: {last_error}")
