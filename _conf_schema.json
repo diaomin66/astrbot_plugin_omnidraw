@@ -1,4 +1,5 @@
 {
+  "allowed_users": "",
   "providers": {
     "description": "🔌 API 节点配置",
     "type": "template_list",
