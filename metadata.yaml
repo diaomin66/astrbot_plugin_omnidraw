@@ -1,7 +1,7 @@
 name: astrbot_plugin_omnidraw
-display_name：万象画卷
-desc: 万象画卷 - 终极多模态多网关绘图聚合器 (融合多节点兜底与人设化生成)
-help: 发送 /画 [提示词] 或 /自拍 [人设名] [场景] 开始作画。发送 /万象帮助 查看详情。
-version: 1.0.0
+display_name: 万象画卷
+desc: 万象画卷 v0.0.1 - 框架版
+help: 发送 /万象帮助 查看说明
+version: 0.0.1
 author: 雪碧bir
-repo: https://github.com/diaomin66/astrbot_plugin_omnidraw
+repo: https://github.com/diaomin66/astrbot_plugin_omnidraw/
