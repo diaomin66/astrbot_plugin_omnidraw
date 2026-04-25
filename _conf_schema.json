@@ -1,57 +1,61 @@
 {
   "providers": {
-    "description": "API 提供商池 (请确保至少有一个节点支持 Image-to-Image/ControlNet 兼容接口用于自拍)",
+    "description": "🔌 API 节点配置 (支持多节点兜底与密钥轮询)",
     "type": "template_list",
-    "templates": {
-      "openai_node": {
-        "name": "添加标准 OpenAI 兼容节点",
-        "items": {
-          "id": "main_node",
-          "api_type": "openai_image",
-          "base_url": "https://api.openai.com/v1",
-          "api_keys": "sk-xxxxxx",
-          "model": "dall-e-3",
-          "timeout": "60"
-        }
-      }
-    },
     "items": {
       "type": "object",
       "keys": {
-        "id": { "description": "提供商唯一ID", "type": "string", "default": "main_node" },
-        "api_type": { "description": "接口类型", "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
+        "id": { "description": "节点ID (如: node_1)", "type": "string", "default": "node_1" },
+        "api_type": { "description": "接口模式", "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
         "base_url": { "description": "接口地址", "type": "string", "default": "https://api.openai.com/v1" },
-        "api_keys": { "description": "API 密钥轮询池 (按回车换行，自动轮换)", "type": "text", "default": "sk-xxxxxx" },
-        "model": { "description": "模型名称 (如: dall-e-3, banana)", "type": "string", "default": "dall-e-3" },
-        "timeout": { "description": "请求超时时间 (秒)", "type": "string", "default": "60" }
+        "api_keys": { "description": "密钥池 (一行一个，自动轮询)", "type": "text", "default": "" },
+        "model": { "description": "模型名称 (如: dall-e-3)", "type": "string", "default": "dall-e-3" },
+        "timeout": { "description": "超时时间 (秒)", "type": "string", "default": "60" }
+      }
+    },
+    "templates": {
+      "openai_node": {
+        "name": "➕ 添加 API 节点",
+        "items": {
+          "id": { "description": "节点ID (如: node_1)", "type": "string", "default": "node_1" },
+          "api_type": { "description": "接口模式", "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
+          "base_url": { "description": "接口地址", "type": "string", "default": "https://api.openai.com/v1" },
+          "api_keys": { "description": "密钥池 (一行一个，自动轮询)", "type": "text", "default": "sk-xxxxxx" },
+          "model": { "description": "模型名称 (如: dall-e-3)", "type": "string", "default": "dall-e-3" },
+          "timeout": { "description": "超时时间 (秒)", "type": "string", "default": "60" }
+        }
       }
     },
     "default": []
   },
-  "chain_text2img": { "description": "文生图兜底链路", "type": "string", "default": "main_node" },
-  "chain_selfie": { "description": "自拍模式兜底链路", "type": "string", "default": "main_node" },
+  "chain_text2img": {
+    "description": "🎨 常规画图链路 (填节点ID，按逗号分隔，如: node_1,node_2)",
+    "type": "string",
+    "default": "node_1"
+  },
+  "chain_selfie": {
+    "description": "🤳 自拍/参考图链路 (必须填支持改图的节点ID)",
+    "type": "string",
+    "default": "node_1"
+  },
   "personas": {
-    "description": "人设库。请直接点击下方卡片中的按钮上传参考图。",
+    "description": "🎭 人设库 (支持直接上传本地图片作为参考)",
     "type": "template_list",
-    "templates": {
-      "default_persona": {
-        "name": "我的默认形象",
-        "items": {
-          "name": "默认人设",
-          "base_prompt": "masterpiece, best quality, beautiful girl, long white hair",
-          "ref_image_url": ""
-        }
-      }
-    },
     "items": {
       "type": "object",
       "keys": {
-        "name": { "description": "人设名称", "type": "string", "default": "默认人设" },
-        "base_prompt": { "description": "人设固定描述提示词", "type": "text", "default": "" },
-        "ref_image_url": { 
-          "description": "参考图 (点击右侧按钮直接上传本地图片)", 
-          "type": "image", 
-          "default": "" 
+        "name": { "description": "人设名称", "type": "string", "default": "" },
+        "base_prompt": { "description": "基础提示词 (英文正向)", "type": "text", "default": "" },
+        "ref_image_url": { "description": "参考图 (点击上传)", "type": "file", "default": "" }
+      }
+    },
+    "templates": {
+      "default_persona": {
+        "name": "➕ 添加人设",
+        "items": {
+          "name": { "description": "人设名称", "type": "string", "default": "默认人设" },
+          "base_prompt": { "description": "基础提示词 (英文正向)", "type": "text", "default": "masterpiece, best quality" },
+          "ref_image_url": { "description": "参考图 (点击上传)", "type": "file", "default": "" }
         }
       }
     },
