@@ -1,81 +1,95 @@
 """
-AstrBot 万象画卷插件 v3.1 - 数据模型
-修复：精准定位 AstrBot 插件独立数据目录 (plugin_data)
+AstrBot 万象画卷插件 v3.1 - OpenAI 标准实现 (极度防弹版)
+破解失效之谜：严格遵循 multipart/form-data 规范进行改图
 """
-import os
-from dataclasses import dataclass, field
-from typing import List, Dict, Any
+import aiohttp
+import json
+from typing import Any
+from astrbot.api import logger
+from .base import BaseProvider
 
-@dataclass
-class ProviderConfig:
-    id: str
-    api_type: str
-    base_url: str
-    api_keys: List[str]
-    model: str
-    timeout: float
+class OpenAIProvider(BaseProvider):
 
-@dataclass
-class PluginConfig:
-    providers: List[ProviderConfig]
-    chains: Dict[str, List[str]]
-    persona_name: str
-    persona_base_prompt: str
-    persona_ref_image: str
+    async def _get_image_bytes(self, image_path_or_url: str) -> bytes:
+        if image_path_or_url.startswith("http"):
+            async with self.session.get(image_path_or_url) as resp:
+                return await resp.read()
+        else:
+            with open(image_path_or_url, "rb") as f:
+                return f.read()
 
-    @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> "PluginConfig":
-        providers = [
-            ProviderConfig(
-                id=p.get("id", ""),
-                api_type=p.get("api_type", "openai_image"),
-                base_url=p.get("base_url", ""),
-                api_keys=[k.strip() for k in p.get("api_keys", "").split("\n") if k.strip()],
-                model=p.get("model", ""),
-                timeout=float(p.get("timeout", 60.0))
-            ) for p in config_dict.get("providers", [])
-        ]
+    async def generate_image(self, prompt: str, **kwargs: Any) -> str:
+        current_key = self.get_current_key()
+        if not current_key:
+            raise ValueError("节点未配置 API Key！")
+
+        # 去掉末尾可能多余的斜杠
+        base_url = self.config.base_url.rstrip("/")
+        ref_image = kwargs.get("user_ref") or kwargs.get("persona_ref")
+
+        if ref_image:
+            # ==========================================
+            # 🖼️ 图生图模式 (Image-to-Image / Edits)
+            # 修复：直接老老实实拼接 /images/edits，不再做多余截断
+            # ==========================================
+            url = base_url + "/images/edits"
+            logger.info("✅ 检测到参考图，正切换至标准改图通道: " + url)
+            
+            try:
+                image_bytes = await self._get_image_bytes(ref_image)
+            except Exception as e:
+                raise RuntimeError("读取参考图数据失败: " + str(e))
+
+            data = aiohttp.FormData()
+            data.add_field('image', image_bytes, filename='reference.png', content_type='image/png')
+            data.add_field('prompt', prompt)
+            data.add_field('model', self.config.model)
+            data.add_field('n', '1')
+            
+            headers = {"Authorization": "Bearer " + current_key}
+            timeout_obj = aiohttp.ClientTimeout(total=self.config.timeout)
+            async with self.session.post(url, data=data, headers=headers, timeout=timeout_obj) as response:
+                return await self._parse_response(response, base_url)
+                
+        else:
+            # ==========================================
+            # 🎨 文生图模式 (Text-to-Image / Generations)
+            # ==========================================
+            url = base_url + "/images/generations"
+            payload = {"model": self.config.model, "prompt": prompt, "n": 1}
+            headers = {"Content-Type": "application/json", "Authorization": "Bearer " + current_key}
+            
+            timeout_obj = aiohttp.ClientTimeout(total=self.config.timeout)
+            async with self.session.post(url, json=payload, headers=headers, timeout=timeout_obj) as response:
+                return await self._parse_response(response, base_url)
+
+    async def _parse_response(self, response: aiohttp.ClientResponse, base_url: str) -> str:
+        status = response.status
+        if status != 200:
+            error_text = await response.text()
+            logger.error("💥 API 返回错误:\n" + error_text)
+            error_msg = error_text
+            try:
+                error_json = json.loads(error_text)
+                if "error" in error_json and "message" in error_json["error"]:
+                    error_msg = error_json["error"]["message"]
+            except Exception:
+                pass
+                
+            raise RuntimeError("HTTP " + str(status) + ": " + error_msg)
         
-        raw_image = config_dict.get("persona_ref_image", "")
-        ref_path = ""
+        result = await response.json()
         
-        # 兼容 AstrBot 会把单文件包装成列表传过来的情况
-        if isinstance(raw_image, list) and len(raw_image) > 0:
-            raw_image = raw_image[0]
-            
-        if isinstance(raw_image, dict):
-            ref_path = raw_image.get("path") or raw_image.get("url") or raw_image.get("file") or ""
-        elif isinstance(raw_image, str):
-            ref_path = raw_image.strip()
-            
-        # ==========================================
-        # 🛠️ 核心修复：对齐你发现的插件真实存储路径
-        # ==========================================
-        if ref_path and not ref_path.startswith("http") and not os.path.isabs(ref_path):
-            # 优先尝试你发现的正确隔离路径：data/plugin_data/astrbot_plugin_omnidraw/
-            plugin_data_dir = os.path.join(os.getcwd(), "data", "plugin_data", "astrbot_plugin_omnidraw")
-            target_path = os.path.abspath(os.path.join(plugin_data_dir, ref_path))
-            
-            # 双重防弹保险：如果这也没找到，再降级去旧版公共 data 目录下找
-            if not os.path.exists(target_path):
-                fallback_path = os.path.abspath(os.path.join(os.getcwd(), "data", ref_path))
-                if os.path.exists(fallback_path):
-                    target_path = fallback_path
-                    
-            ref_path = target_path
-            
-        chains = {
-            "text2img": [p.strip() for p in config_dict.get("chain_text2img", "node_1").split(",") if p.strip()],
-            "selfie": [p.strip() for p in config_dict.get("chain_selfie", "node_1").split(",") if p.strip()]
-        }
-
-        return cls(
-            providers=providers,
-            chains=chains,
-            persona_name=config_dict.get("persona_name", "默认助理"),
-            persona_base_prompt=config_dict.get("persona_base_prompt", ""),
-            persona_ref_image=ref_path
-        )
-
-    def get_provider(self, provider_id: str) -> ProviderConfig:
-        return next((p for p in self.providers if p.id == provider_id), None)
+        if "data" in result and len(result["data"]) > 0:
+            data_item = result["data"][0]
+            if "b64_json" in data_item:
+                return "data:image/png;base64," + data_item["b64_json"]
+            if "url" in data_item:
+                img_url = data_item["url"]
+                if not img_url.startswith("http") and not img_url.startswith("data:"):
+                    clean_base = base_url.rstrip("/v1")
+                    clean_url = img_url.lstrip("/")
+                    img_url = clean_base + "/" + clean_url
+                return img_url
+                
+        raise ValueError("API 返回结构异常，未找到图片数据: " + str(result))
