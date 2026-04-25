@@ -1,6 +1,6 @@
 """
-AstrBot 万象画卷插件 v1.7.4
-功能描述：人设库管理与人设 Prompt 构造服务 (本地图库极速版 - 致敬你的完美思路)
+AstrBot 万象画卷插件 v1.8.0
+功能描述：人设库管理与人设 Prompt 构造服务 (完全本地化加载版)
 """
 
 from typing import Tuple, Dict, Any, Optional
@@ -8,18 +8,13 @@ import os
 from astrbot.api import logger
 from ..models import PluginConfig, PersonaConfig
 
-# 获取当前文件所在目录 (core) 的上一级，也就是插件的根目录
 PLUGIN_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-# 按照你的思路，在插件内部定义一个专属的图片文件夹
 LOCAL_IMAGE_DIR = os.path.join(PLUGIN_ROOT, "images")
 
 class PersonaManager:
     def __init__(self, config: PluginConfig):
         self.config = config
-        # 初始化时，如果不存在这个文件夹，就自动帮你建好
-        if not os.path.exists(LOCAL_IMAGE_DIR):
-            os.makedirs(LOCAL_IMAGE_DIR, exist_ok=True)
-            logger.info(f"📁 已自动创建插件专属本地图库: {LOCAL_IMAGE_DIR}")
+        os.makedirs(LOCAL_IMAGE_DIR, exist_ok=True)
 
     def get_persona(self, name: str) -> Optional[PersonaConfig]:
         for p in self.config.personas:
@@ -54,47 +49,31 @@ class PersonaManager:
         extra_kwargs = {}
         
         if persona.ref_image_name:
-            real_path = None
             target_filename = persona.ref_image_name.strip()
             
-            # ==========================================
-            # 🚀 策略 1：本地专属图库极速直读 (你的方案)
-            # ==========================================
+            # 第一优先级：精确匹配本地文件夹
             local_guess_path = os.path.join(LOCAL_IMAGE_DIR, target_filename)
             if os.path.exists(local_guess_path):
-                real_path = local_guess_path
-                logger.info(f"⚡ [极速加载] 从插件本地图库瞬间找到图片: {real_path}")
-
-            # ==========================================
-            # 🔍 策略 2：定向解析 WebUI 缓存 (精准打击，拒绝全盘扫描)
-            # ==========================================
-            if not real_path:
-                for path in self.config.ref_images_pool:
-                    if target_filename.lower() in os.path.basename(path).lower():
-                        # AstrBot 常见的几个相对路径基准点
-                        possible_bases = [
-                            os.getcwd(),                                      # 运行根目录
-                            os.path.join(os.getcwd(), "data"),                # 标准 data 目录
-                            os.path.abspath(os.path.join(PLUGIN_ROOT, "../../..")) # 从插件目录反推 AstrBot Core 目录
-                        ]
-                        for base in possible_bases:
-                            test_path = os.path.join(base, path)
-                            if os.path.exists(test_path):
-                                real_path = test_path
-                                logger.info(f"✅ 从 WebUI 缓存精准定位图片: {real_path}")
-                                break
-                        break
-
-            # ==========================================
-            # 🏁 最终结算
-            # ==========================================
-            if real_path and os.path.exists(real_path):
-                extra_kwargs["ref_image_path_or_url"] = real_path
+                extra_kwargs["ref_image_path_or_url"] = local_guess_path
+                logger.info(f"⚡ [极速加载] 从本地图库瞬间读取成功: {local_guess_path}")
+            
+            # 第二优先级：网络链接
+            elif target_filename.startswith("http"):
+                extra_kwargs["ref_image_path_or_url"] = target_filename
+                logger.info(f"🌐 识别为网络 URL 参考图: {target_filename}")
+                
+            # 第三优先级：模糊搜索本地文件夹（比如你只输入了 "120c8d"）
             else:
-                if persona.ref_image_name.startswith("http"):
-                    extra_kwargs["ref_image_path_or_url"] = persona.ref_image_name
-                    logger.info(f"✅ 识别为网络 URL 参考图: {persona.ref_image_name}")
-                else:
-                    logger.warning(f"⚠️ 找不到图片 '{target_filename}'！\n💡 建议: 请直接将图片复制到插件的 images 文件夹 ({LOCAL_IMAGE_DIR}) 下。")
+                matched = False
+                for file in os.listdir(LOCAL_IMAGE_DIR):
+                    if target_filename.lower() in file.lower():
+                        matched_path = os.path.join(LOCAL_IMAGE_DIR, file)
+                        extra_kwargs["ref_image_path_or_url"] = matched_path
+                        logger.info(f"🎯 [智能补全] 从本地图库模糊匹配成功: {matched_path}")
+                        matched = True
+                        break
+                
+                if not matched:
+                    logger.warning(f"⚠️ 找不到图片 '{target_filename}'！当前专属图库 ({LOCAL_IMAGE_DIR}) 内存在的图片有: {os.listdir(LOCAL_IMAGE_DIR)}")
 
         return final_prompt, extra_kwargs
