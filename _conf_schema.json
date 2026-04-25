@@ -1,0 +1,87 @@
+{
+  "providers": {
+    "description": "API 提供商池 (配置你的多个绘画API节点)",
+    "type": "template_list",
+    "templates": {
+      "添加标准 OpenAI 节点": {
+        "id": "main_node",
+        "api_type": "openai_image",
+        "base_url": "https://api.openai.com/v1",
+        "api_key": "sk-xxxxxx",
+        "model": "dall-e-3"
+      }
+    },
+    "keys": {
+      "id": {
+        "description": "提供商唯一ID (例如: main_node, backup_node)",
+        "type": "string",
+        "default": "main_node"
+      },
+      "api_type": {
+        "description": "接口类型 (目前支持: openai_image)",
+        "type": "string",
+        "default": "openai_image"
+      },
+      "base_url": {
+        "description": "接口地址 (如: https://api.openai.com/v1)",
+        "type": "string",
+        "default": "https://api.openai.com/v1"
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型名称 (如: dall-e-3)",
+        "type": "string",
+        "default": "dall-e-3"
+      }
+    },
+    "default": []
+  },
+  "chain_text2img": {
+    "description": "文生图兜底链路 (按顺序尝试节点ID，用英文逗号分隔)",
+    "type": "string",
+    "default": "main_node"
+  },
+  "chain_selfie": {
+    "description": "自拍模式兜底链路 (按顺序尝试节点ID，用英文逗号分隔)",
+    "type": "string",
+    "default": "main_node"
+  },
+  "personas": {
+    "description": "预设人设/画风库",
+    "type": "template_list",
+    "templates": {
+      "添加二次元画风模板": {
+        "name": "二次元",
+        "base_prompt": "masterpiece, best quality, highly detailed, anime style",
+        "ref_image_url": ""
+      },
+      "添加写实摄影模板": {
+        "name": "写实摄影",
+        "base_prompt": "raw photo, 8k uhd, dslr, soft lighting, high quality, film grain",
+        "ref_image_url": ""
+      }
+    },
+    "keys": {
+      "name": {
+        "description": "人设名称 (如: 机甲女仆)",
+        "type": "string",
+        "default": "默认人设"
+      },
+      "base_prompt": {
+        "description": "核心基础提示词",
+        "type": "text",
+        "default": "masterpiece, best quality, highly detailed"
+      },
+      "ref_image_url": {
+        "description": "固定参考图URL (可选)",
+        "type": "string",
+        "default": ""
+      }
+    },
+    "default": []
+  }
+}
