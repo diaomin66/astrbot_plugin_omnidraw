@@ -1,5 +1,10 @@
 {
-  "allowed_users": "",
+  "allowed_users": {
+    "type": "string",
+    "title": "生图权限白名单 (QQ号)",
+    "description": "填入允许使用的QQ号，多个用英文逗号隔开。留空则默认全员可用。",
+    "default": ""
+  },
   "providers": {
     "description": "🔌 API 节点配置",
     "type": "template_list",
