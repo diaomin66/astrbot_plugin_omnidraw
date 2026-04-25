@@ -1,5 +1,7 @@
 ## 🚀 更新日志 (Changelog) 
 
+### [2026/4/25]新增快速切换模型
+
 ### [2026/4/25]日志中增加调用用时返回  <img width="332" height="21" alt="PixPin_2026-04-25_21-22-24" src="https://github.com/user-attachments/assets/23d50606-e7bd-4f2b-90d1-5c6cead7ce07" />
 
 
