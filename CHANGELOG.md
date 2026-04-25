@@ -1,4 +1,6 @@
-## 🚀 更新日志 (Changelog) - 万象画卷 v0.1
+## 🚀 更新日志 (Changelog) 
+
+### 优化：兼容base64返回
 
 ### ✨ 新增功能 (New Features)
 * **[权限] 增加 QQ 号白名单机制**：在 WebUI (或 `config.json`) 中新增 `allowed_users` 字段。支持配置允许生图的特定 QQ 号（多个以逗号分隔），留空则默认全员可用，有效防止 API 额度被滥用。
