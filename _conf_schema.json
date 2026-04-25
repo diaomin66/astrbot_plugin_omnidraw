@@ -12,17 +12,11 @@
             "default": "main_node"
           },
           "api_type": {
-            "description": "接口类型 (通过下拉菜单选择)",
+            "description": "接口类型 (填 openai_image 为标准画图，填 openai_chat 为对话伪装出图)",
             "type": "string",
             "options": [
-              {
-                "label": "OpenAI 标准绘图接口 (返回原生图片对象)",
-                "value": "openai_image"
-              },
-              {
-                "label": "OpenAI 聊天伪装出图 (解析Markdown图片链接)",
-                "value": "openai_chat"
-              }
+              "openai_image",
+              "openai_chat"
             ],
             "default": "openai_image"
           },
