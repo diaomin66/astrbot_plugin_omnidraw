@@ -12,8 +12,18 @@
             "default": "main_node"
           },
           "api_type": {
-            "description": "接口类型 (目前支持: openai_image)",
+            "description": "接口类型 (通过下拉菜单选择)",
             "type": "string",
+            "options": [
+              {
+                "label": "OpenAI 标准绘图接口 (返回原生图片对象)",
+                "value": "openai_image"
+              },
+              {
+                "label": "OpenAI 聊天伪装出图 (解析Markdown图片链接)",
+                "value": "openai_chat"
+              }
+            ],
             "default": "openai_image"
           },
           "base_url": {
@@ -27,7 +37,7 @@
             "default": "sk-xxxxxx"
           },
           "model": {
-            "description": "模型名称 (如: dall-e-3)",
+            "description": "模型名称 (如: dall-e-3, gpt-4o)",
             "type": "string",
             "default": "dall-e-3"
           }
