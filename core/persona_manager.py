@@ -1,5 +1,5 @@
 """
-AstrBot 万象画卷插件 v1.7.0
+AstrBot 万象画卷插件 v1.7.1
 功能描述：人设库管理与人设 Prompt 构造服务 (智能匹配全局图库)
 """
 
@@ -47,21 +47,27 @@ class PersonaManager:
         # 🌟 智能雷达：去全局图库池中匹配绝对路径
         if persona.ref_image_name:
             matched_path = None
+            
+            # 【日志增强】：让你一眼看出图库里到底存了什么
+            logger.info(f"🔍 正在图库池 (当前总计 {len(self.config.ref_images_pool)} 张图) 中匹配关键字 '{persona.ref_image_name}'...")
+            
             for path in self.config.ref_images_pool:
-                # 只对比文件名部分，你填 "1.jpg"，它匹配 "/data/.../1.jpg"
-                if persona.ref_image_name.lower() in os.path.basename(path).lower():
+                # 获取文件名并对比
+                file_name = os.path.basename(path).lower()
+                if persona.ref_image_name.lower() in file_name:
                     matched_path = path
                     break
             
             if matched_path and os.path.exists(matched_path):
                 extra_kwargs["ref_image_path_or_url"] = matched_path
-                logger.info(f"✅ 成功从全局图库匹配到人设图: {matched_path}")
+                logger.info(f"✅ 成功从全局图库匹配到人设物理文件: {matched_path}")
             else:
-                # 兜底：如果用户直接在此处填了网络 URL，依然兼容放行
+                # 兜底兼容
                 if persona.ref_image_name.startswith("http"):
                     extra_kwargs["ref_image_path_or_url"] = persona.ref_image_name
                     logger.info(f"✅ 识别为网络 URL 参考图: {persona.ref_image_name}")
                 else:
-                    logger.warning(f"⚠️ 未能在全局图库中找到匹配 '{persona.ref_image_name}' 的图片！请检查上方是否已上传。")
+                    # 【日志增强】：匹配失败时，直接把图库内容全打印出来，方便追查
+                    logger.warning(f"⚠️ 匹配失败！当前图库池的实际内容为: {self.config.ref_images_pool}")
 
         return final_prompt, extra_kwargs
