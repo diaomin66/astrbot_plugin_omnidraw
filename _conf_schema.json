@@ -5,27 +5,32 @@
     "items": {
       "type": "object",
       "keys": {
-        "id": { "type": "string", "default": "node_1" },
-        "api_type": { "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
-        "base_url": { "type": "string", "default": "https://api.openai.com/v1" },
-        "api_keys": { "type": "text", "default": "" },
-        "model": { "type": "string", "default": "banana" },
-        "timeout": { "type": "string", "default": "60" }
+        "id": { "description": "节点ID", "type": "string", "default": "node_1" },
+        "api_type": { "description": "接口模式", "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
+        "base_url": { "description": "接口地址", "type": "string", "default": "https://api.openai.com/v1" },
+        "api_keys": { "description": "密钥池 (一行一个)", "type": "text", "default": "" },
+        "model": { "description": "模型名称", "type": "string", "default": "banana" },
+        "timeout": { "description": "超时时间 (秒)", "type": "string", "default": "60" }
       }
     },
     "templates": {
       "openai_node": {
         "name": "➕ 添加节点",
-        "items": { "id": "node_1", "api_type": "openai_image", "base_url": "", "api_keys": "", "model": "banana", "timeout": "60" }
+        "items": {
+          "id": { "description": "节点ID", "type": "string", "default": "node_1" },
+          "api_type": { "description": "接口模式", "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
+          "base_url": { "description": "接口地址", "type": "string", "default": "https://api.openai.com/v1" },
+          "api_keys": { "description": "密钥池", "type": "text", "default": "sk-xxxxxx" },
+          "model": { "description": "模型名称", "type": "string", "default": "banana" },
+          "timeout": { "description": "超时时间", "type": "string", "default": "60" }
+        }
       }
-    }
+    },
+    "default": []
   },
-  "chain_text2img": { "type": "string", "default": "node_1" },
-  "chain_selfie": { "type": "string", "default": "node_1" },
-  "persona_base_prompt": { "description": "🎭 人设描述词", "type": "text", "default": "masterpiece, 1girl" },
-  "persona_ref_image": {
-    "description": "👤 形象/人脸参考图 (WebUI上传)",
-    "type": "file",
-    "default": ""
-  }
+  "chain_text2img": { "description": "🎨 常规画图链路 (如: node_1)", "type": "string", "default": "node_1" },
+  "chain_selfie": { "description": "🤳 自拍专用链路 (需支持改图的节点)", "type": "string", "default": "node_1" },
+  "persona_name": { "description": "🎭 我的名字 (AI助理的人设称呼)", "type": "string", "default": "默认助理" },
+  "persona_base_prompt": { "description": "📝 我的外貌特征 (英文正向提示词)", "type": "text", "default": "masterpiece, best quality, 1girl" },
+  "persona_ref_image": { "description": "👤 形象/人脸参考图 (直接点击上传)", "type": "file", "default": "" }
 }
