@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1
-功能：精准用时统计 (API耗时 & 发送总耗时) + 完美兼容 Base64 与 URL 混合发图
+功能：动态模型切换支持 + 精准用时统计 + 混合格式物理发图
 """
 import os
 import base64
@@ -60,12 +60,79 @@ class OmniDrawPlugin(Star):
             return Image.fromURL(image_url)
 
     # ==========================================
+    # 🔄 新增：动态模型切换与管理
+    # ==========================================
+    def _get_all_models(self) -> list:
+        models = []
+        for p in self.plugin_config.providers:
+            models.extend(p.available_models)
+        return list(dict.fromkeys(models))  # 去重并保持原有顺序
+
+    def _get_current_active_model(self) -> str:
+        if self.plugin_config.providers:
+            return self.plugin_config.providers[0].model
+        return ""
+
+    @filter.command("切换模型")
+    @handle_errors
+    async def cmd_switch_model(self, event: AstrMessageEvent, target: str = "") -> AsyncGenerator[Any, None]:
+        """切换生图模型"""
+        if not self._has_permission(event):
+            yield event.plain_result(f"{MessageEmoji.WARNING} 抱歉，您暂无权限进行此操作！")
+            return
+
+        models = self._get_all_models()
+        if not models:
+            yield event.plain_result(f"{MessageEmoji.WARNING} 尚未配置任何模型，请在 WebUI 中添加！")
+            return
+
+        target = target.strip()
+        
+        # 1. 未输入目标，返回模型列表
+        if not target:
+            current = self._get_current_active_model()
+            msg = "⚙️ 当前可用模型列表：\n"
+            for i, m in enumerate(models):
+                is_active = " 👈 (当前)" if m == current else ""
+                msg += f"[{i+1}] {m}{is_active}\n"
+            msg += "\n💡 提示：请发送 /切换模型 <序号或名称> 进行切换"
+            yield event.plain_result(msg)
+            return
+
+        # 2. 解析用户输入（支持序号或具体名称）
+        selected_model = None
+        if target.isdigit():
+            idx = int(target) - 1
+            if 0 <= idx < len(models):
+                selected_model = models[idx]
+        else:
+            if target in models:
+                selected_model = target
+
+        if not selected_model:
+            yield event.plain_result(f"{MessageEmoji.ERROR} 找不到该模型，请检查输入的序号或名称！")
+            return
+
+        # 3. 动态修改底层配置
+        success = False
+        for p in self.plugin_config.providers:
+            if selected_model in p.available_models:
+                p.model = selected_model
+                success = True
+
+        if success:
+            logger.info(f"🔄 生图模型已手动切换为: {selected_model}")
+            yield event.plain_result(f"✅ 已成功切换至模型：{selected_model}")
+        else:
+            yield event.plain_result(f"{MessageEmoji.ERROR} 切换失败！")
+
+    # ==========================================
     # 常规指令区 
     # ==========================================
     @filter.command("万象帮助")
     @handle_errors
     async def cmd_help(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
-        help_text = "📖 万象画卷 v3.1 帮助\n/画 [提示词]\n/自拍 [动作描述]"
+        help_text = "📖 万象画卷 v3.1 帮助\n/画 [提示词]\n/自拍 [动作描述]\n/切换模型 [序号或名称]"
         yield event.plain_result(help_text)
 
     @filter.command("画")
@@ -87,21 +154,16 @@ class OmniDrawPlugin(Star):
             kwargs["user_ref"] = user_ref
             
         yield event.plain_result(f"{MessageEmoji.PAINTING} 收到灵感，正在绘制...")
-        
-        # ⏱️ 计时开始
         start_time = time.perf_counter()
         
         async with aiohttp.ClientSession() as session:
             chain_manager = ChainManager(self.plugin_config, session)
             image_url = await chain_manager.run_chain("text2img", prompt, **kwargs)
             
-        # ⏱️ API 耗时计算
         api_time = time.perf_counter()
-        
         yield event.chain_result([self._create_image_component(image_url)])
-        
-        # ⏱️ 总耗时计算
         end_time = time.perf_counter()
+        
         logger.info(f"⏱️ [用时统计 - 指令画图] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
 
     @filter.command("自拍")
@@ -119,7 +181,6 @@ class OmniDrawPlugin(Star):
             extra_kwargs["user_ref"] = user_ref
             
         yield event.plain_result(f"{MessageEmoji.INFO} 正在为「{self.plugin_config.persona_name}」生成自拍...")
-        
         start_time = time.perf_counter()
         
         chain_to_use = "selfie" if "selfie" in self.plugin_config.chains else "text2img"
@@ -128,10 +189,9 @@ class OmniDrawPlugin(Star):
             image_url = await chain_manager.run_chain(chain_to_use, final_prompt, **extra_kwargs)
             
         api_time = time.perf_counter()
-        
         yield event.chain_result([self._create_image_component(image_url)])
-        
         end_time = time.perf_counter()
+        
         logger.info(f"⏱️ [用时统计 - 指令自拍] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
 
     # ==========================================
@@ -161,13 +221,10 @@ class OmniDrawPlugin(Star):
                 image_url = await chain_manager.run_chain(chain_to_use, final_prompt, **extra_kwargs)
             
             api_time = time.perf_counter()
-            
-            # 🚀 物理底层发图，等待发送完成
             await event.send(event.chain_result([self._create_image_component(image_url)]))
-            
             end_time = time.perf_counter()
+            
             logger.info(f"⏱️ [用时统计 - LLM 自拍] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
-
             return "系统提示：自拍图片已经通过底层协议成功发送给用户了。请你现在结合用户刚才的请求，用符合你人设的自然语气回复一两句作为发图后的收尾闲聊 (注意：直接输出纯文本内容，绝对不需要包含任何 Markdown 图片链接)。"
             
         except Exception as e:
@@ -196,13 +253,10 @@ class OmniDrawPlugin(Star):
                 image_url = await chain_manager.run_chain("text2img", prompt, **kwargs)
 
             api_time = time.perf_counter()
-
-            # 🚀 物理底层发图，等待发送完成
             await event.send(event.chain_result([self._create_image_component(image_url)]))
-            
             end_time = time.perf_counter()
+            
             logger.info(f"⏱️ [用时统计 - LLM 画图] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
-
             return "系统提示：画好的图已经物理发送成功了。请你现在立刻回复用户一句话，用符合你人设的语气简单聊两句作为作画后的完美收尾 (直接输出纯文本内容即可，不需要包含图片链接)。"
 
         except Exception as e:
