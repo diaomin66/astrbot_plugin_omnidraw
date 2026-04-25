@@ -1,10 +1,11 @@
 """
 AstrBot 万象画卷插件 v3.1
-功能：精简拟真交互 + 完美兼容 Base64 与 URL 混合发图
+功能：精准用时统计 (API耗时 & 发送总耗时) + 完美兼容 Base64 与 URL 混合发图
 """
 import os
 import base64
 import uuid
+import time
 import aiohttp
 from typing import AsyncGenerator, Any
 
@@ -46,27 +47,20 @@ class OmniDrawPlugin(Star):
         logger.warning(f"🚫 拦截无权限用户调用生图: {sender_id}")
         return False
 
-    # ==========================================
-    # 🚀 新增核心：智能发图组件构造器
-    # 自动识别图片格式，防止 fromURL 报错崩溃
-    # ==========================================
     def _create_image_component(self, image_url: str) -> Image:
         if image_url.startswith("data:image"):
-            # 如果是 Base64，自动解码并保存为本地临时文件
             b64_data = image_url.split(",", 1)[1]
             save_dir = os.path.abspath(os.path.join(os.getcwd(), "data", "plugin_data", "astrbot_plugin_omnidraw", "temp_images"))
             os.makedirs(save_dir, exist_ok=True)
             file_path = os.path.join(save_dir, f"img_{uuid.uuid4().hex[:8]}.png")
             with open(file_path, "wb") as f:
                 f.write(base64.b64decode(b64_data))
-            # 使用本地文件通道发图
             return Image.fromFileSystem(file_path)
         else:
-            # 如果是正常链接，走网络链接通道
             return Image.fromURL(image_url)
 
     # ==========================================
-    # 常规指令区 (使用 yield 直接发消息)
+    # 常规指令区 
     # ==========================================
     @filter.command("万象帮助")
     @handle_errors
@@ -93,12 +87,22 @@ class OmniDrawPlugin(Star):
             kwargs["user_ref"] = user_ref
             
         yield event.plain_result(f"{MessageEmoji.PAINTING} 收到灵感，正在绘制...")
+        
+        # ⏱️ 计时开始
+        start_time = time.perf_counter()
+        
         async with aiohttp.ClientSession() as session:
             chain_manager = ChainManager(self.plugin_config, session)
             image_url = await chain_manager.run_chain("text2img", prompt, **kwargs)
+            
+        # ⏱️ API 耗时计算
+        api_time = time.perf_counter()
         
-        # 🚀 替换为智能组件发送
         yield event.chain_result([self._create_image_component(image_url)])
+        
+        # ⏱️ 总耗时计算
+        end_time = time.perf_counter()
+        logger.info(f"⏱️ [用时统计 - 指令画图] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
 
     @filter.command("自拍")
     @handle_errors
@@ -115,16 +119,23 @@ class OmniDrawPlugin(Star):
             extra_kwargs["user_ref"] = user_ref
             
         yield event.plain_result(f"{MessageEmoji.INFO} 正在为「{self.plugin_config.persona_name}」生成自拍...")
+        
+        start_time = time.perf_counter()
+        
         chain_to_use = "selfie" if "selfie" in self.plugin_config.chains else "text2img"
         async with aiohttp.ClientSession() as session:
             chain_manager = ChainManager(self.plugin_config, session)
             image_url = await chain_manager.run_chain(chain_to_use, final_prompt, **extra_kwargs)
+            
+        api_time = time.perf_counter()
         
-        # 🚀 替换为智能组件发送
         yield event.chain_result([self._create_image_component(image_url)])
+        
+        end_time = time.perf_counter()
+        logger.info(f"⏱️ [用时统计 - 指令自拍] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
 
     # ==========================================
-    # 🤖 LLM 工具区 (静默发图 + 移交回复权)
+    # 🤖 LLM 工具区 
     # ==========================================
     @llm_tool(name="generate_selfie")
     async def tool_generate_selfie(self, event: AstrMessageEvent, action: str) -> str:
@@ -142,13 +153,20 @@ class OmniDrawPlugin(Star):
             if user_ref:
                 extra_kwargs["user_ref"] = user_ref
                 
+            start_time = time.perf_counter()
+                
             chain_to_use = "selfie" if "selfie" in self.plugin_config.chains else "text2img"
             async with aiohttp.ClientSession() as session:
                 chain_manager = ChainManager(self.plugin_config, session)
                 image_url = await chain_manager.run_chain(chain_to_use, final_prompt, **extra_kwargs)
             
-            # 🚀 物理底层发图：使用智能组件解析
+            api_time = time.perf_counter()
+            
+            # 🚀 物理底层发图，等待发送完成
             await event.send(event.chain_result([self._create_image_component(image_url)]))
+            
+            end_time = time.perf_counter()
+            logger.info(f"⏱️ [用时统计 - LLM 自拍] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
 
             return "系统提示：自拍图片已经通过底层协议成功发送给用户了。请你现在结合用户刚才的请求，用符合你人设的自然语气回复一两句作为发图后的收尾闲聊 (注意：直接输出纯文本内容，绝对不需要包含任何 Markdown 图片链接)。"
             
@@ -171,12 +189,19 @@ class OmniDrawPlugin(Star):
             if user_ref:
                 kwargs["user_ref"] = user_ref
                 
+            start_time = time.perf_counter()
+                
             async with aiohttp.ClientSession() as session:
                 chain_manager = ChainManager(self.plugin_config, session)
                 image_url = await chain_manager.run_chain("text2img", prompt, **kwargs)
 
-            # 🚀 物理底层发图：使用智能组件解析
+            api_time = time.perf_counter()
+
+            # 🚀 物理底层发图，等待发送完成
             await event.send(event.chain_result([self._create_image_component(image_url)]))
+            
+            end_time = time.perf_counter()
+            logger.info(f"⏱️ [用时统计 - LLM 画图] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
 
             return "系统提示：画好的图已经物理发送成功了。请你现在立刻回复用户一句话，用符合你人设的语气简单聊两句作为作画后的完美收尾 (直接输出纯文本内容即可，不需要包含图片链接)。"
 
