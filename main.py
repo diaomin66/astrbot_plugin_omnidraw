@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.0
-核心特性：极简架构 + 动态抓取用户发图 + 原生WebUI管理
+核心特性：极简架构 + 动态抓取用户发图 + 原生WebUI管理 + 完整LLM工具支持
 """
 import aiohttp
 from typing import AsyncGenerator, Any
@@ -98,6 +98,12 @@ class OmniDrawPlugin(Star):
 
     @llm_tool(name="generate_selfie", description="以此 AI 助理（我）的固定人设和参考形象拍摄一张自拍或人像照片。当用户想看我、看腿、发照片时必须调用。传入的 action 必须是你根据上下文生成的动作场景描述。")
     async def tool_generate_selfie(self, event: AstrMessageEvent, action: str) -> AsyncGenerator[Any, None]:
+        """
+        供大模型调用的自拍工具。
+        
+        Args:
+            action (string): 动作和场景描述。必须是你根据上下文扩写并翻译成英文的高质量提示词，包含动作、表情、服装、环境等细节。
+        """
         logger.info(f"🧠 [LLM Tool] 触发智能自拍！描述: {action}")
         try:
             final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(action)
@@ -120,6 +126,12 @@ class OmniDrawPlugin(Star):
 
     @llm_tool(name="generate_image", description="AI 画图工具。当用户提出明确的画面要求你画出来时调用此工具。")
     async def tool_generate_image(self, event: AstrMessageEvent, prompt: str) -> AsyncGenerator[Any, None]:
+        """
+        供大模型调用的画图接口。
+        
+        Args:
+            prompt (string): 扩写成英文的高质量正向提示词。必须包含画面主体、环境、光影、画风等丰富细节。
+        """
         logger.info(f"🧠 [LLM Tool] 触发画图！描述: {prompt}")
         try:
             yield event.plain_result(f"{MessageEmoji.PAINTING} 好的，马上为你作画...")
@@ -133,4 +145,5 @@ class OmniDrawPlugin(Star):
                 image_url = await chain_manager.run_chain("text2img", prompt, **kwargs)
             yield event.chain_result([Image.fromURL(image_url), Plain(f"\n{MessageEmoji.SUCCESS} 画好啦！")])
         except Exception as e:
+            logger.error(f"❌ [LLM Tool] 画图失败: {e}", exc_info=True)
             yield event.plain_result(f"{MessageEmoji.ERROR} 画笔坏了：{str(e)}")
