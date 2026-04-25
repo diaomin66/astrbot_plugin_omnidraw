@@ -1,7 +1,10 @@
 """
 AstrBot 万象画卷插件 v3.1
-功能：修复大模型工具参数丢失问题（移除装饰器占用，启用纯正 docstring 解析） + QQ号白名单
+功能：QQ号白名单 + 大模型自然语言回复前置 (Markdown图片融合)
 """
+import os
+import base64
+import uuid
 import aiohttp
 from typing import AsyncGenerator, Any
 
@@ -43,6 +46,9 @@ class OmniDrawPlugin(Star):
         logger.warning(f"🚫 拦截无权限用户调用生图: {sender_id}")
         return False
 
+    # ==========================================
+    # 常规指令区 (直接发图，不经过大模型闲聊)
+    # ==========================================
     @filter.command("万象帮助")
     @handle_errors
     async def cmd_help(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
@@ -95,8 +101,19 @@ class OmniDrawPlugin(Star):
         yield event.chain_result([Image.fromURL(image_url)])
 
     # ==========================================
-    # 🚀 核心修复：移除装饰器中的 description，让框架去读取详细的注释！
+    # 🤖 LLM 工具区 (拦截发图动作，移交大模型回复)
     # ==========================================
+    def _save_base64_to_temp(self, b64_url: str) -> str:
+        """核心组件：将 Base64 转化为本地文件，以便 Markdown 解析"""
+        b64_data = b64_url.split(",", 1)[1]
+        save_dir = os.path.abspath(os.path.join(os.getcwd(), "data", "plugin_data", "astrbot_plugin_omnidraw", "temp_images"))
+        os.makedirs(save_dir, exist_ok=True)
+        file_path = os.path.join(save_dir, f"img_{uuid.uuid4().hex[:8]}.png")
+        with open(file_path, "wb") as f:
+            f.write(base64.b64decode(b64_data))
+        # 将反斜杠替换为正斜杠，防止 Markdown 转义失效
+        return file_path.replace("\\", "/")
+
     @llm_tool(name="generate_selfie")
     async def tool_generate_selfie(self, event: AstrMessageEvent, action: str) -> AsyncGenerator[Any, None]:
         """
@@ -118,7 +135,14 @@ class OmniDrawPlugin(Star):
             async with aiohttp.ClientSession() as session:
                 chain_manager = ChainManager(self.plugin_config, session)
                 image_url = await chain_manager.run_chain(chain_to_use, final_prompt, **extra_kwargs)
-            yield event.chain_result([Image.fromURL(image_url)])
+            
+            # 1. 临时保存并获取路径
+            if image_url.startswith("data:image"):
+                image_url = self._save_base64_to_temp(image_url)
+
+            # 2. 不直接发送！而是作为系统提示词退给大模型，让大模型把它说出来！
+            return f"自拍成功！图片路径：{image_url} \n请你现在立刻用符合你人设的自然语气回复用户，并且必须在你的回复内容的最后面，附上这句 Markdown 代码来发图：![image]({image_url})"
+            
         except Exception as e:
             yield event.plain_result(f"{MessageEmoji.ERROR} 画笔坏了：{str(e)}")
 
@@ -134,7 +158,7 @@ class OmniDrawPlugin(Star):
             return
 
         try:
-            yield event.plain_result(f"{MessageEmoji.PAINTING} 好的，马上为你作画...")
+            # 隐藏了以前会立刻弹出的 "好的马上作画..."，让全程更自然无感
             kwargs = {}
             user_ref = self._get_event_image(event)
             if user_ref:
@@ -143,6 +167,13 @@ class OmniDrawPlugin(Star):
             async with aiohttp.ClientSession() as session:
                 chain_manager = ChainManager(self.plugin_config, session)
                 image_url = await chain_manager.run_chain("text2img", prompt, **kwargs)
-            yield event.chain_result([Image.fromURL(image_url)])
+
+            # 1. 临时保存并获取路径
+            if image_url.startswith("data:image"):
+                image_url = self._save_base64_to_temp(image_url)
+
+            # 2. 移交大模型回复
+            return f"画图任务成功！图片路径：{image_url} \n请你现在立刻回复用户，并且必须在你的回复内容的最后面，附上这句 Markdown 代码来展示你画好的图：![image]({image_url})"
+
         except Exception as e:
             yield event.plain_result(f"{MessageEmoji.ERROR} 画笔坏了：{str(e)}")
