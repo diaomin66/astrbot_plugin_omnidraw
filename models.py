@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1 - 数据模型
-修复：兼容 WebUI file 组件返回 List 格式导致的参考图静默丢失问题
+修复：精准定位 AstrBot 插件独立数据目录 (plugin_data)
 """
 import os
 from dataclasses import dataclass, field
@@ -36,9 +36,6 @@ class PluginConfig:
             ) for p in config_dict.get("providers", [])
         ]
         
-        # ==========================================
-        # 🛠️ 核心修复：防弹级提取 WebUI 参考图路径
-        # ==========================================
         raw_image = config_dict.get("persona_ref_image", "")
         ref_path = ""
         
@@ -51,9 +48,21 @@ class PluginConfig:
         elif isinstance(raw_image, str):
             ref_path = raw_image.strip()
             
-        # 修正相对路径 (AstrBot 默认将其保存在 data 目录下)
+        # ==========================================
+        # 🛠️ 核心修复：对齐你发现的插件真实存储路径
+        # ==========================================
         if ref_path and not ref_path.startswith("http") and not os.path.isabs(ref_path):
-            ref_path = os.path.abspath(os.path.join(os.getcwd(), "data", ref_path))
+            # 优先尝试你发现的正确隔离路径：data/plugin_data/astrbot_plugin_omnidraw/
+            plugin_data_dir = os.path.join(os.getcwd(), "data", "plugin_data", "astrbot_plugin_omnidraw")
+            target_path = os.path.abspath(os.path.join(plugin_data_dir, ref_path))
+            
+            # 双重防弹保险：如果这也没找到，再降级去旧版公共 data 目录下找
+            if not os.path.exists(target_path):
+                fallback_path = os.path.abspath(os.path.join(os.getcwd(), "data", ref_path))
+                if os.path.exists(fallback_path):
+                    target_path = fallback_path
+                    
+            ref_path = target_path
             
         chains = {
             "text2img": [p.strip() for p in config_dict.get("chain_text2img", "node_1").split(",") if p.strip()],
