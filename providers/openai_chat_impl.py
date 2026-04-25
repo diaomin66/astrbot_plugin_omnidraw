@@ -10,7 +10,7 @@ import json
 import base64
 from typing import Any
 from astrbot.api import logger
-from .base import BaseProvider
+from data.plugins.astrbot_plugin_omnidraw.providers.base import BaseProvider
 
 class OpenAIChatProvider(BaseProvider):
 
