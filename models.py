@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1 - 数据模型
-新增功能：WebUI 用户白名单权限解析
+新增功能：支持 WebUI 多模型解析 (英文逗号分隔) 与动态切换
 """
 import os
 from dataclasses import dataclass, field
@@ -12,8 +12,9 @@ class ProviderConfig:
     api_type: str
     base_url: str
     api_keys: List[str]
-    model: str
+    model: str  # 当前生效的活跃模型
     timeout: float
+    available_models: List[str] = field(default_factory=list) # 解析出的所有可用模型列表
 
 @dataclass
 class PluginConfig:
@@ -22,21 +23,28 @@ class PluginConfig:
     persona_name: str
     persona_base_prompt: str
     persona_ref_image: str
-    allowed_users: List[str] # 🚀 新增：允许的QQ号列表
+    allowed_users: List[str]
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> "PluginConfig":
-        providers = [
-            ProviderConfig(
+        providers = []
+        for p in config_dict.get("providers", []):
+            model_raw = str(p.get("model", ""))
+            # 🚀 核心：解析逗号分隔的多个模型 (兼容中文逗号)
+            available_models = [m.strip() for m in model_raw.replace("，", ",").split(",") if m.strip()]
+            # 默认将第一个作为当前激活的模型
+            active_model = available_models[0] if available_models else ""
+            
+            providers.append(ProviderConfig(
                 id=p.get("id", ""),
                 api_type=p.get("api_type", "openai_image"),
                 base_url=p.get("base_url", ""),
                 api_keys=[k.strip() for k in p.get("api_keys", "").split("\n") if k.strip()],
-                model=p.get("model", ""),
-                timeout=float(p.get("timeout", 60.0))
-            ) for p in config_dict.get("providers", [])
-        ]
-        
+                model=active_model,
+                timeout=float(p.get("timeout", 60.0)),
+                available_models=available_models
+            ))
+            
         raw_image = config_dict.get("persona_ref_image", "")
         ref_path = ""
         
@@ -64,12 +72,8 @@ class PluginConfig:
             "selfie": [p.strip() for p in config_dict.get("chain_selfie", "node_1").split(",") if p.strip()]
         }
 
-        # ==========================================
-        # 🚀 权限核心：解析 WebUI 传来的白名单
-        # ==========================================
         raw_users = config_dict.get("allowed_users", "")
         if isinstance(raw_users, str):
-            # 支持用户在 WebUI 里用逗号分割多个 QQ 号
             allowed_users = [u.strip() for u in raw_users.replace("，", ",").split(",") if u.strip()]
         elif isinstance(raw_users, list):
             allowed_users = [str(u).strip() for u in raw_users]
