@@ -11,8 +11,8 @@ from typing import AsyncGenerator, Any
 from astrbot.api.star import Context, Star, register
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.message_components import Image, Plain
-from astrbot.api import logger
-from astrbot.api.provider import llm_tool  # <--- 导入大模型工具装饰器
+# 【关键修复】直接从 astrbot.api 中导入 logger 和 llm_tool
+from astrbot.api import logger, llm_tool 
 
 from .models import PluginConfig
 from .constants import MessageEmoji
