@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1
-功能：动态模型切换支持 + 精准用时统计 + 混合格式物理发图
+功能：仅列出并切换当前使用服务商节点的模型 + 精准用时统计 + 混合格式物理发图
 """
 import os
 import base64
@@ -60,46 +60,50 @@ class OmniDrawPlugin(Star):
             return Image.fromURL(image_url)
 
     # ==========================================
-    # 🔄 新增：动态模型切换与管理
+    # 🔄 改进：精准获取当前服务商节点及其模型
     # ==========================================
-    def _get_all_models(self) -> list:
-        models = []
-        for p in self.plugin_config.providers:
-            models.extend(p.available_models)
-        return list(dict.fromkeys(models))  # 去重并保持原有顺序
-
-    def _get_current_active_model(self) -> str:
+    def _get_active_provider(self):
+        """获取当前主用的生图节点"""
+        chain = self.plugin_config.chains.get("text2img", [])
+        if chain:
+            return self.plugin_config.get_provider(chain[0])
         if self.plugin_config.providers:
-            return self.plugin_config.providers[0].model
-        return ""
+            return self.plugin_config.providers[0]
+        return None
 
     @filter.command("切换模型")
     @handle_errors
     async def cmd_switch_model(self, event: AstrMessageEvent, target: str = "") -> AsyncGenerator[Any, None]:
-        """切换生图模型"""
+        """切换当前节点的生图模型"""
         if not self._has_permission(event):
             yield event.plain_result(f"{MessageEmoji.WARNING} 抱歉，您暂无权限进行此操作！")
             return
 
-        models = self._get_all_models()
+        # 1. 锁定当前使用的提供商节点
+        provider = self._get_active_provider()
+        if not provider:
+            yield event.plain_result(f"{MessageEmoji.WARNING} 尚未配置任何生图节点，请在 WebUI 中添加！")
+            return
+
+        models = provider.available_models
         if not models:
-            yield event.plain_result(f"{MessageEmoji.WARNING} 尚未配置任何模型，请在 WebUI 中添加！")
+            yield event.plain_result(f"{MessageEmoji.WARNING} 当前节点未配置可用模型，请在 WebUI 中用逗号隔开添加！")
             return
 
         target = target.strip()
         
-        # 1. 未输入目标，返回模型列表
+        # 2. 未输入目标，仅返回当前节点下的模型列表
         if not target:
-            current = self._get_current_active_model()
-            msg = "⚙️ 当前可用模型列表：\n"
+            current = provider.model
+            msg = f"⚙️ 当前节点 [{provider.id}] 的可用模型：\n"
             for i, m in enumerate(models):
                 is_active = " 👈 (当前)" if m == current else ""
                 msg += f"[{i+1}] {m}{is_active}\n"
-            msg += "\n💡 提示：请发送 /切换模型 <序号或名称> 进行切换"
+            msg += "\n💡 提示：请发送 /切换模型 <序号或名称>"
             yield event.plain_result(msg)
             return
 
-        # 2. 解析用户输入（支持序号或具体名称）
+        # 3. 解析用户输入（序号或名称）
         selected_model = None
         if target.isdigit():
             idx = int(target) - 1
@@ -113,18 +117,10 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(f"{MessageEmoji.ERROR} 找不到该模型，请检查输入的序号或名称！")
             return
 
-        # 3. 动态修改底层配置
-        success = False
-        for p in self.plugin_config.providers:
-            if selected_model in p.available_models:
-                p.model = selected_model
-                success = True
-
-        if success:
-            logger.info(f"🔄 生图模型已手动切换为: {selected_model}")
-            yield event.plain_result(f"✅ 已成功切换至模型：{selected_model}")
-        else:
-            yield event.plain_result(f"{MessageEmoji.ERROR} 切换失败！")
+        # 4. 精准修改当前节点的模型
+        provider.model = selected_model
+        logger.info(f"🔄 节点 [{provider.id}] 的生图模型已手动切换为: {selected_model}")
+        yield event.plain_result(f"✅ 已成功将节点 [{provider.id}] 切换至模型：{selected_model}")
 
     # ==========================================
     # 常规指令区 
@@ -132,7 +128,7 @@ class OmniDrawPlugin(Star):
     @filter.command("万象帮助")
     @handle_errors
     async def cmd_help(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
-        help_text = "📖 万象画卷 v3.1 帮助\n/画 [提示词]\n/自拍 [动作描述]\n/切换模型 [序号或名称]"
+        help_text = "📖 万象画卷 v3.1 帮助\n/画 [提示词]\n/自拍 [动作描述]\n/切换模型 [序号/名称]"
         yield event.plain_result(help_text)
 
     @filter.command("画")
