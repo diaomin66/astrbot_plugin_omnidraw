@@ -4,7 +4,6 @@ AstrBot 万象画卷插件 v3.1 - 数据模型
 import os
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
-from astrbot.api.star import StarTools # 🚀 绝对正确的官方导入路径！
 
 @dataclass
 class ProviderConfig:
@@ -31,7 +30,8 @@ class PluginConfig:
     allowed_users: List[str]
 
     @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> "PluginConfig":
+    # 🚀 核心修改：新增 data_dir 参数，由外部主程序喂入准确的绝对路径
+    def from_dict(cls, config_dict: Dict[str, Any], data_dir: str) -> "PluginConfig":
         providers = []
         for p in config_dict.get("providers", []):
             model_raw = str(p.get("model", ""))
@@ -60,7 +60,6 @@ class PluginConfig:
                 available_models=available_models
             ))
 
-        # 完美保留你的卡片分组提取
         persona_conf = config_dict.get("persona_config", {})
         opt_conf = config_dict.get("optimizer_config", {})
         router_conf = config_dict.get("router_config", {})
@@ -74,9 +73,9 @@ class PluginConfig:
         elif isinstance(raw_image, str): ref_path = raw_image.strip()
             
         if ref_path and not ref_path.startswith("http") and not os.path.isabs(ref_path):
-            # 🚀 彻底消灭硬编码：直接取框架动态分配的插件专属数据目录
-            plugin_data_dir = str(StarTools.get_data_dir())
-            ref_path = os.path.abspath(os.path.join(plugin_data_dir, ref_path))
+            # 🚀 彻底消灭硬编码：使用传入的 data_dir
+            target_path = os.path.abspath(os.path.join(data_dir, ref_path))
+            ref_path = target_path if os.path.exists(target_path) else os.path.abspath(os.path.join(data_dir, ref_path))
             
         chains = {
             "text2img": [p.strip() for p in router_conf.get("chain_text2img", "node_1").split(",") if p.strip()],
