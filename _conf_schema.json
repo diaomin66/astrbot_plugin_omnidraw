@@ -4,7 +4,12 @@
     "description": "🛡️ 权限控制",
     "hint": "管理谁可以使用本插件的生图和视频功能",
     "items": {
-      "allowed_users": { "type": "string", "description": "允许使用的QQ号", "hint": "多个用英文逗号隔开。留空则默认全员可用。", "default": "" }
+      "allowed_users": {
+        "type": "string",
+        "description": "允许使用的QQ号",
+        "hint": "多个用英文逗号隔开。留空则默认全员可用。",
+        "default": ""
+      }
     },
     "default": {}
   },
