@@ -49,26 +49,12 @@
     "default": {}
   },
   "presets": {
-    "description": "✨ 极速风格预设库 (图生图特供)",
-    "hint": "配置后发送 [图片] + /[预设名] 即可极速改图（如: 发图并配文 /手办化）",
-    "type": "template_list",
-    "items": {
-      "type": "object",
-      "keys": {
-        "command": { "description": "触发指令", "hint": "用户发送 /xxx 触发", "type": "string", "default": "手办化" },
-        "prompt": { "description": "底层英文提示词", "hint": "直接喂给 API 的底层英文预设词", "type": "text", "default": "" }
-      }
-    },
-    "templates": {
-      "shoubanhua": {
-        "name": "➕ 添加手办化预设",
-        "items": {
-          "command": { "type": "string", "default": "手办化" },
-          "prompt": { "type": "text", "default": "masterpiece, best quality, 3d anime figure, octane render, blind box toy, chibi, tilt-shift, highly detailed, clean background" }
-        }
-      }
-    },
-    "default": []
+    "type": "list",
+    "description": "✨ 改图预设提示词",
+    "hint": "格式：预设名:英文提示词。例如：手办化:Transform into figurine style",
+    "default": [
+      "手办化:masterpiece, best quality, 3d anime figure, octane render, blind box toy, chibi, tilt-shift, highly detailed, clean background"
+    ]
   },
   "providers": {
     "description": "🎨 API 生图节点配置",
