@@ -1,18 +1,18 @@
 """
 AstrBot 万象画卷插件 v3.1
-功能：新增异步视频生成 + 模型动态切换 + 精准用时统计 + 混合发图
+功能：新增异步视频生成 + 模型动态切换 + 精准用时统计 + 多图参考能力
 """
 import os
 import base64
 import uuid
 import time
 import aiohttp
-import asyncio  # 🚀 新增：异步任务库
+import asyncio
 from typing import AsyncGenerator, Any
 
 from astrbot.api.star import Context, Star, register
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.message_components import Image, Plain, Video  # 🚀 新增：Video 组件
+from astrbot.api.message_components import Image, Plain, Video
 from astrbot.api import logger, llm_tool 
 
 from .models import PluginConfig
@@ -21,7 +21,7 @@ from .utils import handle_errors
 from .core.chain_manager import ChainManager
 from .core.parser import CommandParser
 from .core.persona_manager import PersonaManager
-from .core.video_manager import VideoManager  # 🚀 新增：视频后台管理器
+from .core.video_manager import VideoManager
 
 @register("astrbot_plugin_omnidraw", "your_name", "万象画卷 v3.1 - 终极版", "3.1.0")
 class OmniDrawPlugin(Star):
@@ -30,15 +30,19 @@ class OmniDrawPlugin(Star):
         self.plugin_config = PluginConfig.from_dict(config or {})
         self.cmd_parser = CommandParser()
         self.persona_manager = PersonaManager(self.plugin_config)
-        self.video_manager = VideoManager(self.plugin_config) # 🚀 初始化视频管理器
+        self.video_manager = VideoManager(self.plugin_config)
 
-    def _get_event_image(self, event: AstrMessageEvent) -> str:
+    # 🚀 升级：将方法改为返回图片列表，不限制张数
+    def _get_event_images(self, event: AstrMessageEvent) -> list:
+        images = []
         for comp in event.message_obj.message:
             if isinstance(comp, Image):
                 path = getattr(comp, "path", getattr(comp, "file", None))
                 url = getattr(comp, "url", None)
-                return path if (path and not path.startswith("http")) else url
-        return ""
+                img_ref = path if (path and not path.startswith("http")) else url
+                if img_ref:
+                    images.append(img_ref)
+        return images
 
     def _has_permission(self, event: AstrMessageEvent) -> bool:
         allowed = self.plugin_config.allowed_users
@@ -62,9 +66,6 @@ class OmniDrawPlugin(Star):
         else:
             return Image.fromURL(image_url)
 
-    # ==========================================
-    # 🔄 动态模型切换管理
-    # ==========================================
     def _get_active_provider(self):
         chain = self.plugin_config.chains.get("text2img", [])
         if chain:
@@ -119,9 +120,6 @@ class OmniDrawPlugin(Star):
         logger.info(f"🔄 节点 [{provider.id}] 的生图模型已手动切换为: {selected_model}")
         yield event.plain_result(f"✅ 已成功将节点 [{provider.id}] 切换至模型：{selected_model}")
 
-    # ==========================================
-    # 常规指令区 
-    # ==========================================
     @filter.command("万象帮助")
     @handle_errors
     async def cmd_help(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
@@ -136,7 +134,9 @@ class OmniDrawPlugin(Star):
             return
 
         message = message.strip()
-        user_ref = self._get_event_image(event)
+        user_refs = self._get_event_images(event)
+        # 常规生图默认只取第一张作参考
+        user_ref = user_refs[0] if user_refs else ""
         
         if not message and not user_ref:
             yield event.plain_result(f"{MessageEmoji.WARNING} 请输入提示词或附带一张参考图！")
@@ -156,7 +156,6 @@ class OmniDrawPlugin(Star):
         api_time = time.perf_counter()
         yield event.chain_result([self._create_image_component(image_url)])
         end_time = time.perf_counter()
-        
         logger.info(f"⏱️ [用时统计 - 指令画图] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
 
     @filter.command("自拍")
@@ -169,7 +168,8 @@ class OmniDrawPlugin(Star):
         user_input = message.strip() if message else "看着镜头微笑"
         final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(user_input)
         
-        user_ref = self._get_event_image(event)
+        user_refs = self._get_event_images(event)
+        user_ref = user_refs[0] if user_refs else ""
         if user_ref:
             extra_kwargs["user_ref"] = user_ref
             
@@ -184,10 +184,8 @@ class OmniDrawPlugin(Star):
         api_time = time.perf_counter()
         yield event.chain_result([self._create_image_component(image_url)])
         end_time = time.perf_counter()
-        
         logger.info(f"⏱️ [用时统计 - 指令自拍] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
 
-    # 🚀 新增：常规指令 /视频 (后台幽灵任务分发)
     @filter.command("视频")
     @handle_errors
     async def cmd_video(self, event: AstrMessageEvent, message: str = "") -> AsyncGenerator[Any, None]:
@@ -196,19 +194,18 @@ class OmniDrawPlugin(Star):
             return
 
         message = message.strip()
-        user_ref = self._get_event_image(event)
+        user_refs = self._get_event_images(event) # 🚀 获取所有图片
         
-        if not message and not user_ref:
-            yield event.plain_result(f"{MessageEmoji.WARNING} 请输入视频提示词或附带一张参考图！")
+        if not message and not user_refs:
+            yield event.plain_result(f"{MessageEmoji.WARNING} 请输入视频提示词或附带参考图！")
             return
             
         prompt, _ = self.cmd_parser.parse(message)
         
-        # 立刻发出通知，安抚用户
         yield event.plain_result(f"{MessageEmoji.INFO} 视频生成指令已提交！通常需要几分钟时间渲染，请您稍后，完成后会自动推送喵~")
         
-        # 将耗时的轮询任务丢给底层 Event Loop，切断主阻塞！
-        asyncio.create_task(self.video_manager.background_task_runner(event, prompt, user_ref))
+        # 🚀 将包含多图的列表传递给视频引擎
+        asyncio.create_task(self.video_manager.background_task_runner(event, prompt, user_refs))
 
 
     # ==========================================
@@ -226,12 +223,11 @@ class OmniDrawPlugin(Star):
 
         try:
             final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(action)
-            user_ref = self._get_event_image(event)
-            if user_ref:
-                extra_kwargs["user_ref"] = user_ref
+            user_refs = self._get_event_images(event)
+            if user_refs:
+                extra_kwargs["user_ref"] = user_refs[0]
                 
             start_time = time.perf_counter()
-                
             chain_to_use = "selfie" if "selfie" in self.plugin_config.chains else "text2img"
             async with aiohttp.ClientSession() as session:
                 chain_manager = ChainManager(self.plugin_config, session)
@@ -240,12 +236,11 @@ class OmniDrawPlugin(Star):
             api_time = time.perf_counter()
             await event.send(event.chain_result([self._create_image_component(image_url)]))
             end_time = time.perf_counter()
-            
             logger.info(f"⏱️ [用时统计 - LLM 自拍] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
-            return "系统提示：自拍图片已经通过底层协议成功发送给用户了。请你现在结合用户刚才的请求，用符合你人设的自然语气回复一两句作为发图后的收尾闲聊 (注意：直接输出纯文本内容，绝对不需要包含任何 Markdown 图片链接)。"
+            return "系统提示：自拍图片已经物理发送成功。请回复一句话闲聊收尾。"
             
         except Exception as e:
-            return f"系统提示：画笔坏了 ({str(e)})。请向用户道歉，并说明无法发图。"
+            return f"系统提示：画笔坏了 ({str(e)})。请向用户道歉。"
 
     @llm_tool(name="generate_image")
     async def tool_generate_image(self, event: AstrMessageEvent, prompt: str) -> str:
@@ -259,12 +254,11 @@ class OmniDrawPlugin(Star):
 
         try:
             kwargs = {}
-            user_ref = self._get_event_image(event)
-            if user_ref:
-                kwargs["user_ref"] = user_ref
+            user_refs = self._get_event_images(event)
+            if user_refs:
+                kwargs["user_ref"] = user_refs[0]
                 
             start_time = time.perf_counter()
-                
             async with aiohttp.ClientSession() as session:
                 chain_manager = ChainManager(self.plugin_config, session)
                 image_url = await chain_manager.run_chain("text2img", prompt, **kwargs)
@@ -272,14 +266,12 @@ class OmniDrawPlugin(Star):
             api_time = time.perf_counter()
             await event.send(event.chain_result([self._create_image_component(image_url)]))
             end_time = time.perf_counter()
-            
             logger.info(f"⏱️ [用时统计 - LLM 画图] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
-            return "系统提示：画好的图已经物理发送成功了。请你现在立刻回复用户一句话，用符合你人设的语气简单聊两句作为作画后的完美收尾 (直接输出纯文本内容即可，不需要包含图片链接)。"
+            return "系统提示：画好的图已经物理发送成功了。请立刻回复用户一句话完美收尾。"
 
         except Exception as e:
-            return f"系统提示：画笔坏了 ({str(e)})。请向用户道歉，并说明无法发图。"
+            return f"系统提示：画笔坏了 ({str(e)})。请向用户道歉。"
 
-    # 🚀 新增：LLM 视频生成工具 (即用即走，后台挂机)
     @llm_tool(name="generate_video")
     async def tool_generate_video(self, event: AstrMessageEvent, prompt: str) -> str:
         """
@@ -290,14 +282,12 @@ class OmniDrawPlugin(Star):
         if not self._has_permission(event):
             return "系统提示：当前用户没有权限使用视频功能，请你委婉地拒绝他。"
             
-        user_ref = self._get_event_image(event)
+        # 🚀 抓取所有参考图传给后台
+        user_refs = self._get_event_images(event)
 
         try:
-            # 1. 创建后台轮询任务，脱离主线程
-            asyncio.create_task(self.video_manager.background_task_runner(event, prompt, user_ref))
-
-            # 2. 立刻放行大模型，提供系统语境让大模型闲聊安抚用户
-            return "系统提示：视频生成任务已经成功提交到后台！由于视频渲染需要几分钟时间，请你现在立刻回复用户，用符合你人设的自然语气告诉他：视频正在后台努力渲染中，让他先稍等几分钟，做完后会主动发给他 (注意：直接输出说话的纯文本内容即可，不需要包含任何多媒体链接)。"
+            asyncio.create_task(self.video_manager.background_task_runner(event, prompt, user_refs))
+            return "系统提示：视频生成任务已经成功提交到后台！视频正在努力渲染中，让用户先稍等几分钟，做完后会主动发给他。"
 
         except Exception as e:
-            return f"系统提示：视频渲染提交失败 ({str(e)})。请向用户道歉，并说明你的服务器开小差了。"
+            return f"系统提示：视频渲染提交失败 ({str(e)})。请向用户道歉。"
