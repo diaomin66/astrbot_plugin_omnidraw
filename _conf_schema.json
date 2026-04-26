@@ -3,45 +3,49 @@
     "type": "object",
     "title": "🛡️ 权限控制",
     "description": "管理谁可以使用本插件的生图和视频功能",
-    "keys": {
+    "items": {
       "allowed_users": {
         "type": "string",
         "title": "允许使用的QQ号",
         "description": "多个用英文逗号隔开。留空则默认全员可用。",
         "default": ""
       }
-    }
+    },
+    "default": {}
   },
   "persona_config": {
     "type": "object",
     "title": "🎭 人设定制",
     "description": "定义 AI 助理在使用 /自拍 时的专属固定形象",
-    "keys": {
+    "items": {
       "persona_name": { "title": "助理名称", "description": "如: 默认助理", "type": "string", "default": "默认助理" },
       "persona_base_prompt": { "title": "外貌特征", "description": "固定在提示词前方的英文正向特征", "type": "text", "default": "masterpiece, best quality, 1girl" },
       "persona_ref_image": { "title": "形象参考图", "description": "直接点击上传人脸/形象参考图", "type": "file", "default": "" }
-    }
+    },
+    "default": {}
   },
   "optimizer_config": {
     "type": "object",
     "title": "🧠 提示词副脑 (Prompt Optimizer)",
     "description": "拦截简单指令并自动扩写为高维度英文提示词",
-    "keys": {
+    "items": {
       "enable_optimizer": { "type": "bool", "title": "副脑总开关", "description": "大模型自拍时是否调用副脑？关闭则无延迟。", "default": true },
       "chain_optimizer": { "title": "执行链路", "description": "调用哪个节点来扩写提示词", "type": "string", "default": "node_1" },
       "optimizer_model": { "title": "指定模型", "description": "推荐极速模型，如 gpt-4o-mini", "type": "string", "default": "gpt-4o-mini" },
       "optimizer_timeout": { "title": "超时时间 (秒)", "description": "建议 8~15 秒", "type": "string", "default": "15" }
-    }
+    },
+    "default": {}
   },
   "router_config": {
     "type": "object",
     "title": "🔗 路由调度",
     "description": "将不同的指令绑定到具体的 API 节点执行",
-    "keys": {
+    "items": {
       "chain_text2img": { "title": "常规画图链路", "description": "执行 /画 绑定的节点ID", "type": "string", "default": "node_1" },
       "chain_selfie": { "title": "自拍专用链路", "description": "执行 /自拍 绑定的节点ID", "type": "string", "default": "node_1" },
       "chain_video": { "title": "视频生成链路", "description": "执行 /视频 绑定的视频节点ID", "type": "string", "default": "video_node_1" }
-    }
+    },
+    "default": {}
   },
   "providers": {
     "title": "🎨 API 生图节点配置",
