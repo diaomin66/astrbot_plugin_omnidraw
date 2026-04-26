@@ -1,17 +1,18 @@
 """
 AstrBot 万象画卷插件 v3.1
-功能：仅列出并切换当前使用服务商节点的模型 + 精准用时统计 + 混合格式物理发图
+功能：新增异步视频生成 + 模型动态切换 + 精准用时统计 + 混合发图
 """
 import os
 import base64
 import uuid
 import time
 import aiohttp
+import asyncio  # 🚀 新增：异步任务库
 from typing import AsyncGenerator, Any
 
 from astrbot.api.star import Context, Star, register
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import Image, Plain, Video  # 🚀 新增：Video 组件
 from astrbot.api import logger, llm_tool 
 
 from .models import PluginConfig
@@ -20,6 +21,7 @@ from .utils import handle_errors
 from .core.chain_manager import ChainManager
 from .core.parser import CommandParser
 from .core.persona_manager import PersonaManager
+from .core.video_manager import VideoManager  # 🚀 新增：视频后台管理器
 
 @register("astrbot_plugin_omnidraw", "your_name", "万象画卷 v3.1 - 终极版", "3.1.0")
 class OmniDrawPlugin(Star):
@@ -28,6 +30,7 @@ class OmniDrawPlugin(Star):
         self.plugin_config = PluginConfig.from_dict(config or {})
         self.cmd_parser = CommandParser()
         self.persona_manager = PersonaManager(self.plugin_config)
+        self.video_manager = VideoManager(self.plugin_config) # 🚀 初始化视频管理器
 
     def _get_event_image(self, event: AstrMessageEvent) -> str:
         for comp in event.message_obj.message:
@@ -60,10 +63,9 @@ class OmniDrawPlugin(Star):
             return Image.fromURL(image_url)
 
     # ==========================================
-    # 🔄 改进：精准获取当前服务商节点及其模型
+    # 🔄 动态模型切换管理
     # ==========================================
     def _get_active_provider(self):
-        """获取当前主用的生图节点"""
         chain = self.plugin_config.chains.get("text2img", [])
         if chain:
             return self.plugin_config.get_provider(chain[0])
@@ -74,12 +76,10 @@ class OmniDrawPlugin(Star):
     @filter.command("切换模型")
     @handle_errors
     async def cmd_switch_model(self, event: AstrMessageEvent, target: str = "") -> AsyncGenerator[Any, None]:
-        """切换当前节点的生图模型"""
         if not self._has_permission(event):
             yield event.plain_result(f"{MessageEmoji.WARNING} 抱歉，您暂无权限进行此操作！")
             return
 
-        # 1. 锁定当前使用的提供商节点
         provider = self._get_active_provider()
         if not provider:
             yield event.plain_result(f"{MessageEmoji.WARNING} 尚未配置任何生图节点，请在 WebUI 中添加！")
@@ -92,7 +92,6 @@ class OmniDrawPlugin(Star):
 
         target = target.strip()
         
-        # 2. 未输入目标，仅返回当前节点下的模型列表
         if not target:
             current = provider.model
             msg = f"⚙️ 当前节点 [{provider.id}] 的可用模型：\n"
@@ -103,7 +102,6 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(msg)
             return
 
-        # 3. 解析用户输入（序号或名称）
         selected_model = None
         if target.isdigit():
             idx = int(target) - 1
@@ -117,7 +115,6 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(f"{MessageEmoji.ERROR} 找不到该模型，请检查输入的序号或名称！")
             return
 
-        # 4. 精准修改当前节点的模型
         provider.model = selected_model
         logger.info(f"🔄 节点 [{provider.id}] 的生图模型已手动切换为: {selected_model}")
         yield event.plain_result(f"✅ 已成功将节点 [{provider.id}] 切换至模型：{selected_model}")
@@ -128,7 +125,7 @@ class OmniDrawPlugin(Star):
     @filter.command("万象帮助")
     @handle_errors
     async def cmd_help(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
-        help_text = "📖 万象画卷 v3.1 帮助\n/画 [提示词]\n/自拍 [动作描述]\n/切换模型 [序号/名称]"
+        help_text = "📖 万象画卷 v3.1 帮助\n/画 [提示词]\n/自拍 [动作描述]\n/切换模型 [序号/名称]\n/视频 [提示词]"
         yield event.plain_result(help_text)
 
     @filter.command("画")
@@ -189,6 +186,30 @@ class OmniDrawPlugin(Star):
         end_time = time.perf_counter()
         
         logger.info(f"⏱️ [用时统计 - 指令自拍] API 生图耗时: {api_time - start_time:.2f}秒 | 发送总耗时: {end_time - start_time:.2f}秒")
+
+    # 🚀 新增：常规指令 /视频 (后台幽灵任务分发)
+    @filter.command("视频")
+    @handle_errors
+    async def cmd_video(self, event: AstrMessageEvent, message: str = "") -> AsyncGenerator[Any, None]:
+        if not self._has_permission(event):
+            yield event.plain_result(f"{MessageEmoji.WARNING} 抱歉，您暂无视频生成功能的使用权限哦！")
+            return
+
+        message = message.strip()
+        user_ref = self._get_event_image(event)
+        
+        if not message and not user_ref:
+            yield event.plain_result(f"{MessageEmoji.WARNING} 请输入视频提示词或附带一张参考图！")
+            return
+            
+        prompt, _ = self.cmd_parser.parse(message)
+        
+        # 立刻发出通知，安抚用户
+        yield event.plain_result(f"{MessageEmoji.INFO} 视频生成指令已提交！通常需要几分钟时间渲染，请您稍后，完成后会自动推送喵~")
+        
+        # 将耗时的轮询任务丢给底层 Event Loop，切断主阻塞！
+        asyncio.create_task(self.video_manager.background_task_runner(event, prompt, user_ref))
+
 
     # ==========================================
     # 🤖 LLM 工具区 
@@ -257,3 +278,26 @@ class OmniDrawPlugin(Star):
 
         except Exception as e:
             return f"系统提示：画笔坏了 ({str(e)})。请向用户道歉，并说明无法发图。"
+
+    # 🚀 新增：LLM 视频生成工具 (即用即走，后台挂机)
+    @llm_tool(name="generate_video")
+    async def tool_generate_video(self, event: AstrMessageEvent, prompt: str) -> str:
+        """
+        AI 视频生成工具。当用户提出明确的要求让你生成一段视频(mp4)时调用此工具。
+        Args:
+            prompt (string): 扩写成英文的高质量视频场景和动作提示词。
+        """
+        if not self._has_permission(event):
+            return "系统提示：当前用户没有权限使用视频功能，请你委婉地拒绝他。"
+            
+        user_ref = self._get_event_image(event)
+
+        try:
+            # 1. 创建后台轮询任务，脱离主线程
+            asyncio.create_task(self.video_manager.background_task_runner(event, prompt, user_ref))
+
+            # 2. 立刻放行大模型，提供系统语境让大模型闲聊安抚用户
+            return "系统提示：视频生成任务已经成功提交到后台！由于视频渲染需要几分钟时间，请你现在立刻回复用户，用符合你人设的自然语气告诉他：视频正在后台努力渲染中，让他先稍等几分钟，做完后会主动发给他 (注意：直接输出说话的纯文本内容即可，不需要包含任何多媒体链接)。"
+
+        except Exception as e:
+            return f"系统提示：视频渲染提交失败 ({str(e)})。请向用户道歉，并说明你的服务器开小差了。"
