@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1 - 数据模型
-新增功能：加入专属的视频服务商配置 (video_providers)
+功能：解析并校验配置文件，新增副脑优化链与模型字段
 """
 import os
 from dataclasses import dataclass, field
@@ -19,8 +19,9 @@ class ProviderConfig:
 @dataclass
 class PluginConfig:
     providers: List[ProviderConfig]
-    video_providers: List[ProviderConfig]  # 🚀 新增：专门存放视频 API 节点
+    video_providers: List[ProviderConfig]
     chains: Dict[str, List[str]]
+    optimizer_model: str  # 🚀 副脑模型字段
     persona_name: str
     persona_base_prompt: str
     persona_ref_image: str
@@ -45,7 +46,7 @@ class PluginConfig:
                 available_models=available_models
             ))
             
-        # 🚀 2. 解析视频节点 (结构和画图类似，但独立存放)
+        # 2. 解析视频节点
         video_providers = []
         for p in config_dict.get("video_providers", []):
             model_raw = str(p.get("model", ""))
@@ -54,15 +55,15 @@ class PluginConfig:
             
             video_providers.append(ProviderConfig(
                 id=p.get("id", ""),
-                api_type=p.get("api_type", "openai_video"), # 例如 Grok Video 或 Veo
+                api_type=p.get("api_type", "openai_video"),
                 base_url=p.get("base_url", ""),
                 api_keys=[k.strip() for k in p.get("api_keys", "").split("\n") if k.strip()],
                 model=active_model,
-                timeout=float(p.get("timeout", 300.0)), # 视频默认超时时间给长一点：5分钟
+                timeout=float(p.get("timeout", 300.0)),
                 available_models=available_models
             ))
 
-        # 3. 处理人设图与链
+        # 3. 处理人设图与路径
         raw_image = config_dict.get("persona_ref_image", "")
         ref_path = ""
         if isinstance(raw_image, list) and len(raw_image) > 0:
@@ -82,13 +83,15 @@ class PluginConfig:
                     target_path = fallback_path
             ref_path = target_path
             
+        # 4. 解析所有执行链条
         chains = {
             "text2img": [p.strip() for p in config_dict.get("chain_text2img", "node_1").split(",") if p.strip()],
             "selfie": [p.strip() for p in config_dict.get("chain_selfie", "node_1").split(",") if p.strip()],
-            "video": [p.strip() for p in config_dict.get("chain_video", "video_node_1").split(",") if p.strip()] # 🚀 新增：视频专用执行链
+            "video": [p.strip() for p in config_dict.get("chain_video", "video_node_1").split(",") if p.strip()],
+            "optimizer": [p.strip() for p in config_dict.get("chain_optimizer", "node_1").split(",") if p.strip()] 
         }
 
-        # 4. 白名单
+        # 5. 白名单
         raw_users = config_dict.get("allowed_users", "")
         if isinstance(raw_users, str):
             allowed_users = [u.strip() for u in raw_users.replace("，", ",").split(",") if u.strip()]
@@ -101,6 +104,7 @@ class PluginConfig:
             providers=providers,
             video_providers=video_providers,
             chains=chains,
+            optimizer_model=config_dict.get("optimizer_model", "gpt-4o-mini"), # 🚀 动态读取副脑模型
             persona_name=config_dict.get("persona_name", "默认助理"),
             persona_base_prompt=config_dict.get("persona_base_prompt", ""),
             persona_ref_image=ref_path,
