@@ -1,6 +1,6 @@
 """
 视频任务后台挂机引擎 (Background Polling Task)
-功能：代替大模型忍受视频生成的漫长耗时，不阻塞聊天通道，支持自动降级轮询接口
+功能：代替大模型忍受视频生成的漫长耗时，不阻塞聊天通道，支持自动降级轮询接口与多图参考
 """
 import re
 import time
@@ -31,16 +31,19 @@ class VideoManager:
         match = re.search(r'(https?://[^\s\]\)"\']+)', text)
         return match.group(1) if match else text
 
-    async def _fetch_video_from_api(self, provider: ProviderConfig, prompt: str, image_url: str = "") -> str:
+    # 🚀 升级：将 image_url (字符串) 升级为 image_urls (列表)
+    async def _fetch_video_from_api(self, provider: ProviderConfig, prompt: str, image_urls: list = None) -> str:
         """
-        🚀 终极健壮版：自动按顺序尝试多个视频接口
+        终极健壮版：自动按顺序尝试多个视频接口，并支持不限张数的参考图
         """
+        if image_urls is None:
+            image_urls = []
+            
         headers = {
             "Authorization": f"Bearer {provider.api_keys[0]}",
             "Content-Type": "application/json"
         }
         
-        # 定义要尝试的接口顺序（优先级从上到下）
         endpoints_to_try = [
             "/v1/chat/completions",
             "/v1/videos/generations",
@@ -53,16 +56,13 @@ class VideoManager:
             for endpoint_suffix in endpoints_to_try:
                 endpoint = provider.base_url.rstrip("/") + endpoint_suffix
                 
-                # 1. 动态构建 Payload (不同接口格式完全不同)
+                # 1. 动态构建 Payload
                 if endpoint_suffix == "/v1/chat/completions":
-                    # Chat 接口要求 messages 格式
-                    content = prompt
-                    if image_url:
-                        # 多模态图生视频格式
-                        content = [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": image_url}}
-                        ]
+                    # Chat 接口要求 messages 格式，支持多模态多图片拼接
+                    content = [{"type": "text", "text": prompt}]
+                    for img in image_urls:
+                        content.append({"type": "image_url", "image_url": {"url": img}})
+                        
                     payload = {
                         "model": provider.model,
                         "messages": [{"role": "user", "content": content}]
@@ -73,23 +73,20 @@ class VideoManager:
                         "model": provider.model,
                         "prompt": prompt
                     }
-                    if image_url:
-                        payload["image_url"] = image_url
+                    if image_urls:
+                        # 兼容处理：如果只有一张图传字符串，多图传列表
+                        payload["image_url"] = image_urls[0] if len(image_urls) == 1 else image_urls
 
                 try:
-                    logger.info(f"🎬 [尝试视频接口] 正在请求: {endpoint}")
-                    # 设定长达几分钟的超时时间，因为视频 API 通常是长连接阻塞返回
+                    logger.info(f"🎬 [尝试视频接口] 正在请求: {endpoint} (携带 {len(image_urls)} 张参考图)")
                     async with session.post(endpoint, headers=headers, json=payload, timeout=provider.timeout) as resp:
-                        # 如果是 404 (接口不存在) 或 400 (参数不支持)，抛出异常触发重试
                         resp.raise_for_status() 
-                        
                         data = await resp.json()
                         
                         # 2. 动态解析返回值
                         if endpoint_suffix == "/v1/chat/completions":
                             if "choices" in data and len(data["choices"]) > 0:
                                 raw_content = data["choices"][0]["message"]["content"]
-                                # Chat 接口可能会返回 Markdown 代码，需要提取纯 URL
                                 final_url = self._extract_url(raw_content)
                                 logger.info(f"✅ 成功从 {endpoint_suffix} 获取视频！")
                                 return final_url
@@ -105,13 +102,12 @@ class VideoManager:
                 except Exception as e:
                     last_error = str(e)
                     logger.warning(f"⚠️ 接口 {endpoint_suffix} 尝试失败: {e}，自动切换下一个...")
-                    continue # 核心：失败则悄悄继续下一次循环
+                    continue
 
-            # 如果把三个接口都试完了还是没 return 出去，说明彻底凉了
             logger.error(f"❌ 所有视频接口均尝试失败。最后的错误: {last_error}")
             raise Exception(f"所有接口均不支持该操作。最后错误: {last_error}")
 
-    async def background_task_runner(self, event: AstrMessageEvent, prompt: str, image_url: str = ""):
+    async def background_task_runner(self, event: AstrMessageEvent, prompt: str, image_urls: list = None):
         """
         👻 核心幽灵任务：在后台默默执行，不受 LLM 时间限制！
         """
@@ -123,13 +119,10 @@ class VideoManager:
             return
 
         try:
-            # 1. 挂机等待 API 生成完毕 (即使卡5分钟，也不会影响大模型聊天)
-            video_url = await self._fetch_video_from_api(provider, prompt, image_url)
-            
+            video_url = await self._fetch_video_from_api(provider, prompt, image_urls)
             end_time = time.perf_counter()
             logger.info(f"✅ [视频任务完成] 耗时: {end_time - start_time:.2f} 秒！准备逆向推送给用户。")
             
-            # 2. 逆向物理推送：调用框架的底层 API，直接把 mp4 砸到群里
             if video_url:
                 await event.send(event.chain_result([
                     Plain("🎬 当当当！你要求的视频渲染完成啦：\n"),
