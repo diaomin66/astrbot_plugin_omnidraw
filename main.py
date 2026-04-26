@@ -9,11 +9,10 @@ import aiohttp
 import asyncio
 from typing import AsyncGenerator, Any
 
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, register, StarTools # 🚀 正确导入
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.message_components import Image, Plain, Video
 from astrbot.api import logger, llm_tool 
-from astrbot.api.utils import StarTools # 🚀 引入官方路径工具
 
 from .models import PluginConfig
 from .constants import MessageEmoji
@@ -48,8 +47,8 @@ class OmniDrawPlugin(Star):
         processed_paths = []
         if not raw_images: return processed_paths
         
-        # 🚀 替换硬编码，获取规范数据目录
-        save_dir = os.path.abspath(os.path.join(StarTools.get_data_dir(), "astrbot_plugin_omnidraw", "user_refs"))
+        # 🚀 替换硬编码，使用规范子目录
+        save_dir = os.path.abspath(os.path.join(str(StarTools.get_data_dir()), "user_refs"))
         os.makedirs(save_dir, exist_ok=True)
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         
@@ -89,7 +88,7 @@ class OmniDrawPlugin(Star):
         if image_url.startswith("data:image"):
             b64_data = image_url.split(",", 1)[1]
             # 🚀 同步替换硬编码
-            save_dir = os.path.abspath(os.path.join(StarTools.get_data_dir(), "astrbot_plugin_omnidraw", "temp_images"))
+            save_dir = os.path.abspath(os.path.join(str(StarTools.get_data_dir()), "temp_images"))
             os.makedirs(save_dir, exist_ok=True)
             file_path = os.path.join(save_dir, f"img_{uuid.uuid4().hex[:8]}.png")
             with open(file_path, "wb") as f: f.write(base64.b64decode(b64_data))
