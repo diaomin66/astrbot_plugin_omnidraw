@@ -9,7 +9,7 @@ import aiohttp
 import asyncio
 from typing import AsyncGenerator, Any
 
-from astrbot.api.star import Context, Star, register, StarTools # 🚀 正确导入
+from astrbot.api.star import Context, Star, register, StarTools # 🚀 正确安全导入
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.message_components import Image, Plain, Video
 from astrbot.api import logger, llm_tool 
@@ -27,7 +27,12 @@ from .core.prompt_optimizer import PromptOptimizer
 class OmniDrawPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
-        self.plugin_config = PluginConfig.from_dict(config or {})
+        # 🚀 核心修复：在正统注册的入口处调用，彻底解决元数据寻址报错！
+        self.data_dir = str(StarTools.get_data_dir())
+        
+        # 将安全的绝对路径喂给 models.py
+        self.plugin_config = PluginConfig.from_dict(config or {}, self.data_dir)
+        
         self.cmd_parser = CommandParser()
         self.persona_manager = PersonaManager(self.plugin_config)
         self.video_manager = VideoManager(self.plugin_config)
@@ -47,8 +52,8 @@ class OmniDrawPlugin(Star):
         processed_paths = []
         if not raw_images: return processed_paths
         
-        # 🚀 替换硬编码，使用规范子目录
-        save_dir = os.path.abspath(os.path.join(str(StarTools.get_data_dir()), "user_refs"))
+        # 🚀 基于主路径构建临时目录，消灭 os.getcwd()
+        save_dir = os.path.abspath(os.path.join(self.data_dir, "user_refs"))
         os.makedirs(save_dir, exist_ok=True)
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         
@@ -87,8 +92,8 @@ class OmniDrawPlugin(Star):
     def _create_image_component(self, image_url: str) -> Image:
         if image_url.startswith("data:image"):
             b64_data = image_url.split(",", 1)[1]
-            # 🚀 同步替换硬编码
-            save_dir = os.path.abspath(os.path.join(str(StarTools.get_data_dir()), "temp_images"))
+            # 🚀 基于主路径构建临时目录，消灭 os.getcwd()
+            save_dir = os.path.abspath(os.path.join(self.data_dir, "temp_images"))
             os.makedirs(save_dir, exist_ok=True)
             file_path = os.path.join(save_dir, f"img_{uuid.uuid4().hex[:8]}.png")
             with open(file_path, "wb") as f: f.write(base64.b64decode(b64_data))
