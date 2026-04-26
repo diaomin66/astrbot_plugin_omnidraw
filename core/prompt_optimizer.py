@@ -31,10 +31,17 @@ class PromptOptimizer:
         if not raw_action or raw_action.strip() == "":
             return raw_action
 
-        if not self.config.providers:
+        # 🚀 动态获取你在 WebUI 设定的链路节点
+        chain = self.config.chains.get("optimizer", [])
+        provider = self.config.get_provider(chain[0]) if chain else None
+        
+        # 兜底：如果填错节点，就用第一个生图节点
+        if not provider and self.config.providers:
+            provider = self.config.providers[0]
+
+        if not provider:
             return raw_action
             
-        provider = self.config.providers[0]
         base_url = provider.base_url.rstrip("/")
         endpoint = f"{base_url}/v1/chat/completions"
         
@@ -74,7 +81,7 @@ CRITICAL RULES:
 }"""
 
         payload = {
-            "model": "gpt-4o-mini", # 建议使用快速模型
+            "model": self.config.optimizer_model, # 🚀 动态读取你在 WebUI 设定的模型！
             "messages": [
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": raw_action}
@@ -85,7 +92,7 @@ CRITICAL RULES:
 
         async with aiohttp.ClientSession() as session:
             try:
-                logger.info(f"🧠 [副脑拦截] 正在按 JSON 结构重构提示词: {raw_action}")
+                logger.info(f"🧠 [副脑拦截] 正在按 JSON 结构重构提示词: {raw_action} (模型: {self.config.optimizer_model})")
                 # 超时稍微放宽到 8 秒，因为输出完整的 JSON 需要稍微多一点 token
                 async with session.post(endpoint, headers=headers, json=payload, timeout=8.0) as resp:
                     resp.raise_for_status()
@@ -107,7 +114,7 @@ CRITICAL RULES:
                             logger.info(f"✨ [副脑完成] 提示词重构成功，共 {len(tags_list)} 个特征维度。")
                             return optimized_prompt
                         except json.JSONDecodeError:
-                            logger.warning(f"⚠️ [副脑降级] 大模型未返回标准 JSON，提取失败。原样返回。")
+                            logger.warning(f"⚠️ [副脑降级] 大模型未返回标准 JSON，提取失败。原样返回。内容: {raw_content[:50]}...")
                             return raw_action
                         
             except Exception as e:
