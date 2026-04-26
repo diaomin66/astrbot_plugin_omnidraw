@@ -73,3 +73,15 @@ astrbot_plugin_omnidraw/
 ---
 
 > **注意：** 本插件需要 `aiohttp` 支持。若使用 `v1/chat/completions` 生成视频，请确保你的中转站模型支持该端点的视频输出。
+
+---
+
+## 🙏 特别鸣谢
+
+本插件的诞生离不开开源社区的灵感与支持，特此致谢：
+
+* **[AstrBot](https://github.com/Soulter/AstrBot)**：感谢作者提供如此强大且高度可扩展的机器人底层框架。
+* **[astrbot_plugin_shoubanhua](https://github.com/shskjw/astrbot_plugin_shoubanhua)**：感谢该项目提供的动态模型热切换思路，极大提升了本插件的可用性。
+* **[astrbot_plugin_gitee_aiimg](https://github.com/muyouzhi6/astrbot_plugin_gitee_aiimg)**：感谢该项目提供的视频接入灵感，促成了本插件异步长时渲染架构的落地。
+
+*(向所有开源贡献者致敬！)*
