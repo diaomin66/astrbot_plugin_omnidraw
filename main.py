@@ -15,7 +15,6 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.message_components import Image, Plain, Video
 from astrbot.api import logger, llm_tool 
 
-# 🚀 引入正确的事件类型，完美兼容 AstrBot V4
 try:
     from astrbot.api.event import EventMessageType
 except ImportError:
@@ -41,14 +40,29 @@ class OmniDrawPlugin(Star):
         self.video_manager = VideoManager(self.plugin_config)
         self.prompt_optimizer = PromptOptimizer(self.plugin_config) 
 
+    # 🚀 升级版找图器：支持嗅探用户“引用（回复）”的那条消息里的图！
     def _get_event_images(self, event: AstrMessageEvent) -> list:
         images = []
+        # 1. 优先检查当前发送的消息里有没有图片
         for comp in event.message_obj.message:
             if isinstance(comp, Image):
                 path = getattr(comp, "path", getattr(comp, "file", None))
                 url = getattr(comp, "url", None)
                 img_ref = path if (path and not path.startswith("http")) else url
                 if img_ref: images.append(img_ref)
+                
+        # 2. 如果当前消息没图，去翻一翻有没有引用/回复别人的消息
+        if not images:
+            quote_obj = getattr(event.message_obj, "quote", None)
+            if quote_obj:
+                quote_msg = getattr(quote_obj, "message", [])
+                if isinstance(quote_msg, list):
+                    for comp in quote_msg:
+                        if isinstance(comp, Image):
+                            path = getattr(comp, "path", getattr(comp, "file", None))
+                            url = getattr(comp, "url", None)
+                            img_ref = path if (path and not path.startswith("http")) else url
+                            if img_ref: images.append(img_ref)
         return images
 
     async def _process_and_save_images(self, raw_images: list) -> list:
@@ -144,13 +158,12 @@ class OmniDrawPlugin(Star):
         yield event.plain_result(f"✅ 已切换至模型：{selected_model}")
 
     # ==========================================
-    # 🚀 预设雷达拦截器：兼容任意指令前缀
+    # 🚀 预设雷达拦截器
     # ==========================================
     @filter.event_message_type(EventMessageType.ALL)
     async def on_message_preset(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
         if not self.plugin_config.presets: return
 
-        # 提取用户的纯文本
         text = ""
         for comp in event.message_obj.message:
             if isinstance(comp, Plain):
@@ -158,35 +171,28 @@ class OmniDrawPlugin(Star):
         text = text.strip()
         if not text: return
 
-        # 🚀 兼容任意框架前缀 (自动去除开头的标点符号，如 / . # ! 等)
-        # 只要开头是非中英文字符，就把它当成前缀剥离掉
         match = re.match(r'^([^\w\u4e00-\u9fa5]+)(.*)$', text)
-        if not match: 
-            return # 如果纯文本无任何前缀，说明是普通聊天，直接放行给大模型
+        if not match: return 
             
         cmd_name = match.group(2).strip()
         
-        # 看看剥离前缀后的词，是不是在我们的预设字典里
-        if cmd_name not in self.plugin_config.presets:
-            return # 不是预设，放行
+        if cmd_name not in self.plugin_config.presets: return 
 
         if not self._has_permission(event):
             yield event.plain_result(f"{MessageEmoji.WARNING} 抱歉，暂无权限！")
             return
 
-        # ⚠️ 强行要求带图！这是改图特供功能
+        # 此处 _get_event_images 已经具备引用嗅探功能！
         raw_refs = self._get_event_images(event)
         if not raw_refs:
-            yield event.plain_result(f"{MessageEmoji.WARNING} 魔法失效！请发一张图片，并配文「{text}」重试哦~")
+            yield event.plain_result(f"{MessageEmoji.WARNING} 魔法失效！请发一张图片，或者引用一张图片，并配文「{text}」重试哦~")
             return
 
         preset_prompt = self.plugin_config.presets[cmd_name]
         safe_refs = await self._process_and_save_images(raw_refs)
         
-        # 极简回复
         yield event.plain_result(f"✨ 正在绘制……")
         
-        # 🚀 直接走底层发送，彻底绕开大模型副脑！
         try:
             async with aiohttp.ClientSession() as session:
                 chain_manager = ChainManager(self.plugin_config, session)
