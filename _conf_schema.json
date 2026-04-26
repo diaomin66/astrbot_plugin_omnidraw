@@ -1,12 +1,28 @@
 {
   "allowed_users": {
     "type": "string",
-    "title": "生图权限白名单 (QQ号)",
+    "title": "🛡️ 权限控制 | 生图白名单 (QQ号)",
     "description": "填入允许使用的QQ号，多个用英文逗号隔开。留空则默认全员可用。",
     "default": ""
   },
+  "persona_name": { "title": "🎭 人设定制 | 助理名称", "description": "AI助理的人设称呼，如: 默认助理", "type": "string", "default": "默认助理" },
+  "persona_base_prompt": { "title": "🎭 人设定制 | 外貌特征", "description": "固定在提示词前方的英文正向特征", "type": "text", "default": "masterpiece, best quality, 1girl" },
+  "persona_ref_image": { "title": "🎭 人设定制 | 形象参考图", "description": "直接点击上传人脸/形象参考图", "type": "file", "default": "" },
+  "enable_optimizer": {
+    "type": "boolean",
+    "title": "🧠 提示词副脑 | 总开关",
+    "description": "开启后，大模型自拍时会调用副脑扩写提示词。关闭则直接使用原词，无延迟。",
+    "default": true
+  },
+  "chain_optimizer": { "title": "🧠 提示词副脑 | 执行链路", "description": "调用哪个节点来扩写提示词 (需开启总开关)", "type": "string", "default": "node_1" },
+  "optimizer_model": { "title": "🧠 提示词副脑 | 指定模型", "description": "推荐极速模型，如 gpt-4o-mini", "type": "string", "default": "gpt-4o-mini" },
+  "optimizer_timeout": { "title": "🧠 提示词副脑 | 超时时间 (秒)", "description": "防止网络拥堵卡死主流程，建议 8~15", "type": "string", "default": "15" },
+  "chain_text2img": { "title": "🔗 路由调度 | 常规画图链路", "description": "执行 /画 绑定的节点ID", "type": "string", "default": "node_1" },
+  "chain_selfie": { "title": "🔗 路由调度 | 自拍专用链路", "description": "执行 /自拍 绑定的节点ID", "type": "string", "default": "node_1" },
+  "chain_video": { "title": "🔗 路由调度 | 视频生成链路", "description": "执行 /视频 绑定的视频节点ID", "type": "string", "default": "video_node_1" },
   "providers": {
-    "description": "🔌 API 节点配置",
+    "title": "🎨 核心 | API 生图节点配置",
+    "description": "支持添加多个文生图/图生图节点",
     "type": "template_list",
     "items": {
       "type": "object",
@@ -35,7 +51,8 @@
     "default": []
   },
   "video_providers": {
-    "description": "🎬 视频 API 节点配置 (后台挂机)",
+    "title": "🎬 核心 | API 视频节点配置",
+    "description": "支持添加挂机渲染长视频节点",
     "type": "template_list",
     "items": {
       "type": "object",
@@ -45,7 +62,7 @@
         "base_url": { "description": "接口地址", "type": "string", "default": "https://api.example.com" },
         "api_keys": { "description": "密钥池 (一行一个)", "type": "text", "default": "" },
         "model": { "description": "视频模型名称 (多个用逗号隔开)", "type": "string", "default": "sora" },
-        "timeout": { "description": "长连接超时时间 (秒)", "type": "string", "default": "300" }
+        "timeout": { "description": "长连接超时 (秒)", "type": "string", "default": "300" }
       }
     },
     "templates": {
@@ -62,14 +79,5 @@
       }
     },
     "default": []
-  },
-  "chain_text2img": { "description": "🎨 常规画图链路 (如: node_1)", "type": "string", "default": "node_1" },
-  "chain_selfie": { "description": "🤳 自拍专用链路 (需支持改图的节点)", "type": "string", "default": "node_1" },
-  "chain_video": { "description": "🎞️ 视频生成链路 (如: video_node_1)", "type": "string", "default": "video_node_1" },
-  "chain_optimizer": { "description": "🧠 副脑优化链路 (调用哪个节点来扩写提示词)", "type": "string", "default": "node_1" },
-  "optimizer_model": { "description": "🧠 副脑指定模型 (推荐极速模型，如 gpt-4o-mini)", "type": "string", "default": "gpt-4o-mini" },
-  "optimizer_timeout": { "description": "⏱️ 副脑思考超时时间 (秒，建议 8~15 之间)", "type": "string", "default": "15" },
-  "persona_name": { "description": "🎭 我的名字 (AI助理的人设称呼)", "type": "string", "default": "默认助理" },
-  "persona_base_prompt": { "description": "📝 我的外貌特征 (英文正向提示词)", "type": "text", "default": "masterpiece, best quality, 1girl" },
-  "persona_ref_image": { "description": "👤 形象/人脸参考图 (直接点击上传)", "type": "file", "default": "" }
+  }
 }
