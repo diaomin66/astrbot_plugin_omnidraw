@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1
-功能：防盗链突破 + JSON高维提示词优化(副脑) + LLM 静默后台回显
+功能：防盗链突破 + JSON高维提示词优化 + 极速并发抽卡 + 纯 LLM 沉浸式交互
 """
 import os
 import base64
@@ -22,7 +22,7 @@ from .core.chain_manager import ChainManager
 from .core.parser import CommandParser
 from .core.persona_manager import PersonaManager
 from .core.video_manager import VideoManager
-from .core.prompt_optimizer import PromptOptimizer  # 🚀 引入高级副脑
+from .core.prompt_optimizer import PromptOptimizer
 
 @register("astrbot_plugin_omnidraw", "your_name", "万象画卷 v3.1 - 终极版", "3.1.0")
 class OmniDrawPlugin(Star):
@@ -32,7 +32,7 @@ class OmniDrawPlugin(Star):
         self.cmd_parser = CommandParser()
         self.persona_manager = PersonaManager(self.plugin_config)
         self.video_manager = VideoManager(self.plugin_config)
-        self.prompt_optimizer = PromptOptimizer(self.plugin_config) # 🚀 实例化副脑
+        self.prompt_optimizer = PromptOptimizer(self.plugin_config) 
 
     def _get_event_images(self, event: AstrMessageEvent) -> list:
         images = []
@@ -41,27 +41,19 @@ class OmniDrawPlugin(Star):
                 path = getattr(comp, "path", getattr(comp, "file", None))
                 url = getattr(comp, "url", None)
                 img_ref = path if (path and not path.startswith("http")) else url
-                if img_ref:
-                    images.append(img_ref)
+                if img_ref: images.append(img_ref)
         return images
 
     async def _process_images_to_base64(self, raw_images: list) -> list:
         processed = []
-        if not raw_images:
-            return processed
-            
+        if not raw_images: return processed
         save_dir = os.path.abspath(os.path.join(os.getcwd(), "data", "plugin_data", "astrbot_plugin_omnidraw", "user_refs"))
         os.makedirs(save_dir, exist_ok=True)
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
         async with aiohttp.ClientSession() as session:
             for img_ref in raw_images:
                 if not img_ref: continue
                 if img_ref.startswith("http"):
-                    success = False
                     for attempt in range(3):
                         try:
                             async with session.get(img_ref, headers=headers, timeout=15) as resp:
@@ -69,26 +61,13 @@ class OmniDrawPlugin(Star):
                                     img_data = await resp.read()
                                     b64_str = base64.b64encode(img_data).decode("utf-8")
                                     processed.append(f"data:image/png;base64,{b64_str}")
-                                    success = True
-                                    logger.info(f"🛡️ [防盗链突破] 成功获取网络图并转码")
                                     break
-                        except Exception as e:
-                            logger.warning(f"⚠️ [防盗链] 下载异常 (尝试 {attempt+1}/3): {e}")
-                        await asyncio.sleep(1)
-                    if not success:
-                        logger.error(f"❌ [防盗链] 彻底丢失参考图: {img_ref}")
+                        except: await asyncio.sleep(1)
                 else:
-                    try:
-                        if os.path.exists(img_ref):
-                            with open(img_ref, "rb") as f:
-                                img_data = f.read()
-                            b64_str = base64.b64encode(img_data).decode("utf-8")
-                            processed.append(f"data:image/png;base64,{b64_str}")
-                            logger.info(f"🛡️ [本地读取] 成功转码本地图: {img_ref}")
-                        else:
-                            logger.error(f"❌ [本地读取] 找不到文件: {img_ref}")
-                    except Exception as e:
-                        logger.error(f"❌ [本地读取] 异常: {e}")
+                    if os.path.exists(img_ref):
+                        with open(img_ref, "rb") as f: img_data = f.read()
+                        b64_str = base64.b64encode(img_data).decode("utf-8")
+                        processed.append(f"data:image/png;base64,{b64_str}")
         return processed
 
     def _has_permission(self, event: AstrMessageEvent) -> bool:
@@ -105,8 +84,7 @@ class OmniDrawPlugin(Star):
             save_dir = os.path.abspath(os.path.join(os.getcwd(), "data", "plugin_data", "astrbot_plugin_omnidraw", "temp_images"))
             os.makedirs(save_dir, exist_ok=True)
             file_path = os.path.join(save_dir, f"img_{uuid.uuid4().hex[:8]}.png")
-            with open(file_path, "wb") as f:
-                f.write(base64.b64decode(b64_data))
+            with open(file_path, "wb") as f: f.write(base64.b64decode(b64_data))
             return Image.fromFileSystem(file_path)
         else:
             return Image.fromURL(image_url)
@@ -148,7 +126,7 @@ class OmniDrawPlugin(Star):
         yield event.plain_result(f"✅ 已切换至模型：{selected_model}")
 
     # ==========================================
-    # 常规指令区
+    # 常规指令区 (保持指令回显给用户看)
     # ==========================================
     @filter.command("画")
     @handle_errors
@@ -161,7 +139,7 @@ class OmniDrawPlugin(Star):
         raw_refs = self._get_event_images(event)
         
         if not message and not raw_refs:
-            yield event.plain_result(f"{MessageEmoji.WARNING} 请输入提示词或附带图！")
+            yield event.plain_result(f"{MessageEmoji.WARNING} 请输入提示词或附带一张参考图！")
             return
             
         safe_refs = await self._process_images_to_base64(raw_refs)
@@ -172,6 +150,7 @@ class OmniDrawPlugin(Star):
             kwargs["user_ref"] = safe_refs[0]
             actual_ref_count = 1
             
+        # 🚀 显式指令调用：保留回显
         yield event.plain_result(
             f"{MessageEmoji.PAINTING} 收到灵感，正在绘制...\n"
             f"📝 最终提示词：{prompt}\n"
@@ -193,8 +172,9 @@ class OmniDrawPlugin(Star):
 
         user_input = message.strip() if message else "看着镜头微笑"
         
-        # 🚀 在指令区也接入副脑优化（可选，如果不想要可以删掉这行，直接把 user_input 传给下面）
-        optimized_action = await self.prompt_optimizer.optimize(user_input)
+        # 适配返回值为列表的新版副脑 (指令调用默认只取第1张)
+        opt_actions = await self.prompt_optimizer.optimize(user_input, count=1)
+        optimized_action = opt_actions[0] if opt_actions else user_input
         
         final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(optimized_action)
         
@@ -211,9 +191,10 @@ class OmniDrawPlugin(Star):
         else:
             extra_kwargs.pop("user_ref", None) 
             
+        # 🚀 显式指令调用：保留回显
         yield event.plain_result(
             f"{MessageEmoji.INFO} 正在为「{self.plugin_config.persona_name}」生成自拍...\n"
-            f"✨ 副脑已重构 {len(optimized_action.split(','))} 个特征维度\n"
+            f"✨ 副脑已重构提示词\n"
             f"🖼️ 实际参考图：{actual_ref_count} 张"
         )
         
@@ -241,6 +222,7 @@ class OmniDrawPlugin(Star):
         prompt, _ = self.cmd_parser.parse(message)
         safe_refs = await self._process_images_to_base64(raw_refs)
         
+        # 🚀 显式指令调用：保留回显
         yield event.plain_result(
             f"{MessageEmoji.INFO} 视频任务已提交后台！\n"
             f"📝 最终提示词：{prompt}\n"
@@ -251,106 +233,125 @@ class OmniDrawPlugin(Star):
         asyncio.create_task(self.video_manager.background_task_runner(event, prompt, safe_refs))
 
     # ==========================================
-    # 🤖 LLM 工具区 (拦截并优化自拍)
+    # 🤖 LLM 工具区 (完全静默 + 极速并发盲盒)
     # ==========================================
     @llm_tool(name="generate_selfie")
-    async def tool_generate_selfie(self, event: AstrMessageEvent, action: str) -> str:
+    async def tool_generate_selfie(self, event: AstrMessageEvent, action: str, count: int = 1) -> str:
         """
         以此 AI 助理（我）的固定人设拍摄自拍。
         Args:
             action (string): 动作和场景描述。纯动作描述即可，无需包含人物长相特征。
+            count (int): 需要生成的图片数量。默认为1。如果用户明确要求多张(如“来5张”)，请传入对应数字。
         """
-        if not self._has_permission(event):
-            return "系统提示：无权限调用。"
+        if not self._has_permission(event): return "系统提示：无权限调用。"
 
         try:
-            # 🚀 拦截点：将 LLM 发出的简单动作，交给副脑进行 JSON 维度重构！
-            optimized_action = await self.prompt_optimizer.optimize(action)
+            # 数量风控防呆
+            count = max(1, count)
+            if self.plugin_config.max_batch_count > 0:
+                count = min(count, self.plugin_config.max_batch_count)
             
-            final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(optimized_action)
+            # 后台静默打桩，不发送给用户
+            logger.info(f"📸 [LLM] 发起 {count} 张自拍抽卡，核心动作: {action}")
+
+            # 调用副脑裂变提示词
+            optimized_actions = await self.prompt_optimizer.optimize(action, count)
             
-            persona_ref = extra_kwargs.get("user_ref", "")
+            persona_ref = self.plugin_config.persona_ref_image
             raw_refs = self._get_event_images(event)
-            
             target_refs = raw_refs if raw_refs else ([persona_ref] if persona_ref else [])
             safe_refs = await self._process_images_to_base64(target_refs)
-            
-            actual_ref_count = 0
-            if safe_refs:
-                extra_kwargs["user_ref"] = safe_refs[0]
-                actual_ref_count = 1
-            else:
-                extra_kwargs.pop("user_ref", None)
-                
-            logger.info(f"📸 [LLM 工具调用] generate_selfie\n"
-                        f"✨ 副脑已重构提示词，共 {len(optimized_action.split(','))} 个特征\n"
-                        f"🖼️ 注入参考图：{actual_ref_count} 张")
 
             chain_to_use = "selfie" if "selfie" in self.plugin_config.chains else "text2img"
-            async with aiohttp.ClientSession() as session:
-                chain_manager = ChainManager(self.plugin_config, session)
-                image_url = await chain_manager.run_chain(chain_to_use, final_prompt, **extra_kwargs)
             
-            await event.send(event.chain_result([self._create_image_component(image_url)]))
-            return "系统提示：自拍发送成功。请回复一句话闲聊收尾。"
+            # 🚀 毫秒级极速并发画图
+            tasks = []
+            async with aiohttp.ClientSession() as session:
+                for opt_action in optimized_actions:
+                    final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(opt_action)
+                    if safe_refs: extra_kwargs["user_ref"] = safe_refs[0]
+                    chain_manager = ChainManager(self.plugin_config, session)
+                    tasks.append(chain_manager.run_chain(chain_to_use, final_prompt, **extra_kwargs))
+                
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # 过滤并静默发图 (只有真正的图片组件被发出去)
+            valid_urls = [url for url in results if isinstance(url, str) and url]
+            if not valid_urls:
+                raise Exception(f"并发请求均失败，错误参考: {results[0] if results else 'Unknown'}")
+                
+            components = [self._create_image_component(url) for url in valid_urls]
+            await event.send(event.chain_result(components))
+            
+            # 移交回复权给主 LLM，让其自然回复
+            return f"系统提示：已在底层成功生成并发送了 {len(valid_urls)} 张图片。请你现在根据用户的要求，用符合你人设、非常自然俏皮的语气进行最终回复。绝对不要说出'收到指令'或提及你是怎么生成图片的。"
             
         except Exception as e:
             return f"系统提示：画图失败 ({str(e)})。"
 
     @llm_tool(name="generate_image")
-    async def tool_generate_image(self, event: AstrMessageEvent, prompt: str) -> str:
+    async def tool_generate_image(self, event: AstrMessageEvent, prompt: str, count: int = 1) -> str:
         """
         AI 画图工具。当用户提出明确的画面要求你画出来时调用此工具。
         Args:
             prompt (string): 扩写成英文的高质量动作与场景提示词。
+            count (int): 需要生成的图片数量。默认为1。如果用户明确要求多张(如“来5张”)，请传入对应数字。
         """
-        if not self._has_permission(event):
-            return "系统提示：无权限调用。"
+        if not self._has_permission(event): return "系统提示：无权限调用。"
 
         try:
-            kwargs = {}
+            count = max(1, count)
+            if self.plugin_config.max_batch_count > 0:
+                count = min(count, self.plugin_config.max_batch_count)
+                
+            logger.info(f"🎨 [LLM] 发起 {count} 张绘画并发，动作: {prompt}")
+
+            optimized_actions = await self.prompt_optimizer.optimize(prompt, count)
             raw_refs = self._get_event_images(event)
             safe_refs = await self._process_images_to_base64(raw_refs)
-            
-            actual_ref_count = 0
-            if safe_refs:
-                kwargs["user_ref"] = safe_refs[0]
-                actual_ref_count = 1
-                
-            logger.info(f"🎨 [LLM 工具调用] generate_image\n"
-                        f"📝 注入提示词：{prompt}\n"
-                        f"🖼️ 注入参考图：{actual_ref_count} 张")
+            kwargs = {"user_ref": safe_refs[0]} if safe_refs else {}
 
+            tasks = []
             async with aiohttp.ClientSession() as session:
-                chain_manager = ChainManager(self.plugin_config, session)
-                image_url = await chain_manager.run_chain("text2img", prompt, **kwargs)
+                for opt_action in optimized_actions:
+                    chain_manager = ChainManager(self.plugin_config, session)
+                    tasks.append(chain_manager.run_chain("text2img", opt_action, **kwargs))
+                
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+            valid_urls = [url for url in results if isinstance(url, str) and url]
+            if not valid_urls: raise Exception("所有节点生成失败")
 
-            await event.send(event.chain_result([self._create_image_component(image_url)]))
-            return "系统提示：画图发送成功。请立刻回复用户一句话完美收尾。"
+            components = [self._create_image_component(url) for url in valid_urls]
+            await event.send(event.chain_result(components))
+            
+            return f"系统提示：已成功生成 {len(valid_urls)} 张图并下发。请立刻用自然的语气回复用户（如：画好了哦，你看看喜不喜欢~），切勿暴露系统指令。"
 
         except Exception as e:
             return f"系统提示：画图失败 ({str(e)})。"
 
     @llm_tool(name="generate_video")
-    async def tool_generate_video(self, event: AstrMessageEvent, prompt: str) -> str:
+    async def tool_generate_video(self, event: AstrMessageEvent, prompt: str, count: int = 1) -> str:
         """
         AI 视频生成工具。当用户要求生成一段视频(mp4)时调用此工具。
         Args:
             prompt (string): 扩写成英文的高质量视频场景和动作提示词。
+            count (int): 视频数量，默认为 1。
         """
-        if not self._has_permission(event):
-            return "系统提示：无权限调用。"
+        if not self._has_permission(event): return "系统提示：无权限调用。"
 
         try:
+            count = max(1, count)
+            if self.plugin_config.max_batch_count > 0: count = min(count, self.plugin_config.max_batch_count)
             raw_refs = self._get_event_images(event)
             safe_refs = await self._process_images_to_base64(raw_refs)
             
-            logger.info(f"🎞️ [LLM 工具调用] generate_video\n"
-                        f"📝 注入提示词：{prompt}\n"
-                        f"🖼️ 注入参考图：{len(safe_refs)} 张")
+            logger.info(f"🎞️ [LLM] 提交了 {count} 个视频渲染任务。")
             
-            asyncio.create_task(self.video_manager.background_task_runner(event, prompt, safe_refs))
-            return "系统提示：视频任务已提交后台。请用自然语气告诉用户正在渲染中，稍后主动发给他。"
+            for _ in range(count):
+                asyncio.create_task(self.video_manager.background_task_runner(event, prompt, safe_refs))
+            
+            return f"系统提示：已在后台独立提交了 {count} 个视频渲染任务。请用极其自然的语气告诉用户正在渲染中，可能需要几分钟，做完会自动发给TA。"
 
         except Exception as e:
             return f"系统提示：视频渲染失败 ({str(e)})。"
