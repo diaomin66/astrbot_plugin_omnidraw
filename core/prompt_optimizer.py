@@ -1,6 +1,3 @@
-"""
-提示词副脑优化器 (Prompt Optimizer)
-"""
 import json
 import re
 import aiohttp
@@ -15,109 +12,81 @@ class PromptOptimizer:
     def _flatten_json_to_tags(self, data) -> list:
         tags = []
         if isinstance(data, dict):
-            for value in data.values():
-                tags.extend(self._flatten_json_to_tags(value))
+            for value in data.values(): tags.extend(self._flatten_json_to_tags(value))
         elif isinstance(data, list):
-            for item in data:
-                tags.extend(self._flatten_json_to_tags(item))
-        elif isinstance(data, str) and data.strip():
-            tags.append(data.strip())
+            for item in data: tags.extend(self._flatten_json_to_tags(item))
+        elif isinstance(data, str) and data.strip(): tags.append(data.strip())
         return tags
 
-    async def optimize(self, raw_action: str) -> str:
-        # 🚀 物理断点：检查 WebUI 总开关，没开就直接秒退原词
+    # 🚀 新增 count 参数，返回列表
+    async def optimize(self, raw_action: str, count: int = 1) -> list:
+        # 如果未开启副脑，直接返回 n 个相同的词
         if not getattr(self.config, "enable_optimizer", True):
-            logger.debug(f"💤 [副脑开关未开启] 跳过优化，直接使用原词: {raw_action}")
-            return raw_action
+            return [raw_action] * count
 
-        if not raw_action or raw_action.strip() == "":
-            return raw_action
+        if not raw_action or raw_action.strip() == "": return [raw_action] * count
 
         chain = self.config.chains.get("optimizer", [])
-        provider = self.config.get_provider(chain[0]) if chain else None
-        
-        if not provider and self.config.providers:
-            provider = self.config.providers[0]
-
-        if not provider:
-            return raw_action
+        provider = self.config.get_provider(chain[0]) if chain else (self.config.providers[0] if self.config.providers else None)
+        if not provider: return [raw_action] * count
             
         base_url = provider.base_url.rstrip("/")
-        if base_url.endswith("/v1"):
-            endpoint = f"{base_url}/chat/completions"
-        else:
-            endpoint = f"{base_url}/v1/chat/completions"
-        
-        headers = {
-            "Authorization": f"Bearer {provider.api_keys[0]}",
-            "Content-Type": "application/json"
-        }
+        endpoint = f"{base_url}/chat/completions" if base_url.endswith("/v1") else f"{base_url}/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {provider.api_keys[0]}", "Content-Type": "application/json"}
 
-        sys_prompt = """You are an expert AI image prompt engineer. 
-Your task is to take the user's short action description and expand it into a highly detailed, professional English prompt based on the exact JSON structure below. 
-CRITICAL RULES:
-1. Output ONLY a valid JSON object. No markdown formatting like ```json, no chat text.
-2. ALL values must be in descriptive English keywords/phrases.
-3. You must preserve and enhance extremely realistic skin textures and facial micro-details.
-
-{
-  "subject": {
-    "appearance": "describe realistic face, high definition, clear facial features, ultra-detailed skin texture, realistic pores",
-    "body_type": "...",
-    "accessories": "..."
-  },
+        base_json_struct = """{
+  "subject": {"appearance": "ultra-detailed skin texture, realistic pores...", "body_type": "...", "accessories": "..."},
   "clothing": {"top": "...", "bottom": "...", "shoes": "..."},
   "pose_and_action": {"pose": "...", "action": "[User's action expanded]", "gaze": "..."},
   "environment": {"scene": "...", "furniture": "...", "decor": "...", "items": "..."},
   "lighting": {"type": "...", "source": "...", "quality": "..."},
   "styling_and_mood": {"aesthetic": "...", "mood": "..."},
-  "technical_specs": {
-    "camera_simulation": "iPhone back camera or high-end mirrorless camera",
-    "focal_length": "24mm or 50mm",
-    "aperture": "f/2.0",
-    "quality_tags": [
-      "ultra photorealistic", "8k resolution", "RAW photo", 
-      "masterpiece", "sharp focus", "Nano Banana Pro optimized", "depth of field"
-    ]
-  }
+  "technical_specs": {"camera_simulation": "...", "focal_length": "...", "aperture": "...", "quality_tags": ["..."]}
 }"""
+
+        # 🚀 魔法分裂系统：根据 count 决定生成 1个 还是 JSON 数组
+        if count == 1:
+            sys_prompt = f"You are an expert AI image prompt engineer.\nOutput ONLY ONE valid JSON object based on the user's action.\nCRITICAL: Output ONLY valid JSON.\n{base_json_struct}"
+        else:
+            sys_prompt = f"You are an expert AI image prompt engineer.\nGenerate EXACTLY {count} variations of the user's action.\nCRITICAL: Output ONLY a valid JSON ARRAY `[...]` containing {count} objects.\nEnsure `subject` and `clothing` remain identical across all objects, but slightly VARY the `pose_and_action` and `environment` in each to create different angles/poses.\n[\n{base_json_struct},\n...\n]"
 
         payload = {
             "model": self.config.optimizer_model,
-            "messages": [
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": raw_action}
-            ],
-            "max_tokens": 500,
-            "temperature": 0.7
+            "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": raw_action}],
+            "max_tokens": 800 if count > 1 else 500, # 多图需更多 token
+            "temperature": 0.8
         }
 
         async with aiohttp.ClientSession() as session:
             try:
-                timeout_val = self.config.optimizer_timeout
-                logger.info(f"🧠 [副脑拦截] 正在按 JSON 结构重构提示词 (模型: {self.config.optimizer_model}, 超时: {timeout_val}s)")
-                
+                timeout_val = self.config.optimizer_timeout * (1.5 if count > 1 else 1.0) # 多图稍微增加超时
+                logger.info(f"🧠 [副脑] 正在重构 {count} 组提示词 (模型: {self.config.optimizer_model})")
                 async with session.post(endpoint, headers=headers, json=payload, timeout=timeout_val) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
-                    
                     if "choices" in data and len(data["choices"]) > 0:
                         raw_content = data["choices"][0]["message"]["content"].strip()
                         json_str = re.sub(r'^```json\s*|\s*```$', '', raw_content, flags=re.MULTILINE)
-                        
                         try:
                             prompt_data = json.loads(json_str)
-                            tags_list = self._flatten_json_to_tags(prompt_data)
-                            optimized_prompt = ", ".join(tags_list)
+                            results = []
+                            # 🚀 无论大模型返回数组还是单对象，全部解析为列表
+                            if isinstance(prompt_data, list):
+                                for item in prompt_data:
+                                    results.append(", ".join(self._flatten_json_to_tags(item)))
+                            elif isinstance(prompt_data, dict):
+                                results.append(", ".join(self._flatten_json_to_tags(prompt_data)))
                             
-                            logger.info(f"✨ [副脑完成] 提示词重构成功，共 {len(tags_list)} 个特征维度。")
-                            return optimized_prompt
-                        except json.JSONDecodeError:
-                            logger.warning(f"⚠️ [副脑降级] 未返回标准 JSON。")
-                            return raw_action
-                        
+                            # 补齐防呆
+                            while len(results) < count:
+                                results.append(results[0] if results else raw_action)
+                                
+                            logger.info(f"✨ [副脑] 成功裂变 {len(results[:count])} 组神级提示词！")
+                            return results[:count]
+                        except Exception as e:
+                            logger.warning(f"⚠️ [副脑] JSON 解析失败: {e}")
+                            return [raw_action] * count
             except Exception as e:
-                logger.warning(f"⚠️ [副脑降级] 优化接口失败或超时，向下传递原词。({str(e)})")
-                return raw_action
-
-        return raw_action
+                logger.warning(f"⚠️ [副脑降级] ({str(e)})")
+                return [raw_action] * count
+        return [raw_action] * count
