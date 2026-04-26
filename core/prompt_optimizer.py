@@ -31,26 +31,27 @@ class PromptOptimizer:
         if not raw_action or raw_action.strip() == "":
             return raw_action
 
-        # 🚀 动态获取你在 WebUI 设定的链路节点
         chain = self.config.chains.get("optimizer", [])
         provider = self.config.get_provider(chain[0]) if chain else None
         
-        # 兜底：如果填错节点，就用第一个生图节点
         if not provider and self.config.providers:
             provider = self.config.providers[0]
 
         if not provider:
             return raw_action
             
+        # 🚀 修复 /v1/v1 叠加 Bug：智能补全或截断
         base_url = provider.base_url.rstrip("/")
-        endpoint = f"{base_url}/v1/chat/completions"
+        if base_url.endswith("/v1"):
+            endpoint = f"{base_url}/chat/completions"
+        else:
+            endpoint = f"{base_url}/v1/chat/completions"
         
         headers = {
             "Authorization": f"Bearer {provider.api_keys[0]}",
             "Content-Type": "application/json"
         }
 
-        # 👑 顶级魔法预设：强制英文 JSON 输出，锁定皮肤细节与 Nano Banana Pro 标准
         sys_prompt = """You are an expert AI image prompt engineer. 
 Your task is to take the user's short action description and expand it into a highly detailed, professional English prompt based on the exact JSON structure below. 
 CRITICAL RULES:
@@ -81,7 +82,7 @@ CRITICAL RULES:
 }"""
 
         payload = {
-            "model": self.config.optimizer_model, # 🚀 动态读取你在 WebUI 设定的模型！
+            "model": self.config.optimizer_model,
             "messages": [
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": raw_action}
@@ -92,29 +93,24 @@ CRITICAL RULES:
 
         async with aiohttp.ClientSession() as session:
             try:
-                logger.info(f"🧠 [副脑拦截] 正在按 JSON 结构重构提示词: {raw_action} (模型: {self.config.optimizer_model})")
-                # 超时稍微放宽到 8 秒，因为输出完整的 JSON 需要稍微多一点 token
+                logger.info(f"🧠 [副脑拦截] 正在按 JSON 结构重构提示词 (模型: {self.config.optimizer_model})")
                 async with session.post(endpoint, headers=headers, json=payload, timeout=8.0) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
                     
                     if "choices" in data and len(data["choices"]) > 0:
                         raw_content = data["choices"][0]["message"]["content"].strip()
-                        
-                        # 强力剥离可能的 Markdown 代码块
                         json_str = re.sub(r'^```json\s*|\s*```$', '', raw_content, flags=re.MULTILINE)
                         
                         try:
-                            # 1. 解析 JSON
                             prompt_data = json.loads(json_str)
-                            # 2. 将高维 JSON 打平为逗号分隔的纯英文 Prompt
                             tags_list = self._flatten_json_to_tags(prompt_data)
                             optimized_prompt = ", ".join(tags_list)
                             
                             logger.info(f"✨ [副脑完成] 提示词重构成功，共 {len(tags_list)} 个特征维度。")
                             return optimized_prompt
                         except json.JSONDecodeError:
-                            logger.warning(f"⚠️ [副脑降级] 大模型未返回标准 JSON，提取失败。原样返回。内容: {raw_content[:50]}...")
+                            logger.warning(f"⚠️ [副脑降级] 未返回标准 JSON。")
                             return raw_action
                         
             except Exception as e:
