@@ -4,12 +4,7 @@
     "description": "🛡️ 权限控制",
     "hint": "管理谁可以使用本插件的生图和视频功能",
     "items": {
-      "allowed_users": {
-        "type": "string",
-        "description": "允许使用的QQ号",
-        "hint": "多个用英文逗号隔开。留空则默认全员可用。",
-        "default": ""
-      }
+      "allowed_users": { "type": "string", "description": "允许使用的QQ号", "hint": "多个用英文逗号隔开。留空则默认全员可用。", "default": "" }
     },
     "default": {}
   },
@@ -29,10 +24,11 @@
     "description": "🧠 提示词副脑 (Prompt Optimizer)",
     "hint": "拦截简单指令并自动扩写为高维度英文提示词",
     "items": {
-      "enable_optimizer": { "type": "bool", "description": "副脑总开关", "hint": "大模型自拍时是否调用副脑？关闭则无延迟。", "default": true },
+      "enable_optimizer": { "type": "bool", "description": "副脑总开关", "hint": "大模型自拍时是否调用副脑？", "default": true },
       "chain_optimizer": { "description": "执行链路", "hint": "调用哪个节点来扩写提示词", "type": "string", "default": "node_1" },
       "optimizer_model": { "description": "指定模型", "hint": "推荐极速模型，如 gpt-4o-mini", "type": "string", "default": "gpt-4o-mini" },
-      "optimizer_timeout": { "description": "超时时间 (秒)", "hint": "建议 8~15 秒", "type": "string", "default": "15" }
+      "optimizer_timeout": { "description": "超时时间 (秒)", "hint": "建议 8~15 秒", "type": "string", "default": "15" },
+      "max_batch_count": { "type": "int", "description": "批量生成数量上限", "hint": "0 表示无上限。防止大模型胡乱调用耗尽余额。", "default": 0 }
     },
     "default": {}
   },
