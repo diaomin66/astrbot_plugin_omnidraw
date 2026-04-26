@@ -20,6 +20,7 @@ class PluginConfig:
     providers: List[ProviderConfig]
     video_providers: List[ProviderConfig]
     chains: Dict[str, List[str]]
+    presets: Dict[str, str]       # 🚀 新增预设字典
     enable_optimizer: bool        
     optimizer_model: str  
     optimizer_timeout: float  
@@ -30,7 +31,6 @@ class PluginConfig:
     allowed_users: List[str]
 
     @classmethod
-    # 🚀 核心修改：新增 data_dir 参数，由外部主程序喂入准确的绝对路径
     def from_dict(cls, config_dict: Dict[str, Any], data_dir: str) -> "PluginConfig":
         providers = []
         for p in config_dict.get("providers", []):
@@ -60,6 +60,16 @@ class PluginConfig:
                 available_models=available_models
             ))
 
+        # 🚀 解析预设库
+        presets_dict = {}
+        for p in config_dict.get("presets", []):
+            cmd = p.get("command", "").strip()
+            prompt = p.get("prompt", "").strip()
+            if cmd and prompt:
+                # 兼容用户配置时手抖带了斜杠的情况
+                if cmd.startswith("/"): cmd = cmd[1:]
+                presets_dict[cmd] = prompt
+
         persona_conf = config_dict.get("persona_config", {})
         opt_conf = config_dict.get("optimizer_config", {})
         router_conf = config_dict.get("router_config", {})
@@ -73,7 +83,6 @@ class PluginConfig:
         elif isinstance(raw_image, str): ref_path = raw_image.strip()
             
         if ref_path and not ref_path.startswith("http") and not os.path.isabs(ref_path):
-            # 🚀 彻底消灭硬编码：使用传入的 data_dir
             target_path = os.path.abspath(os.path.join(data_dir, ref_path))
             ref_path = target_path if os.path.exists(target_path) else os.path.abspath(os.path.join(data_dir, ref_path))
             
@@ -91,6 +100,7 @@ class PluginConfig:
             providers=providers,
             video_providers=video_providers,
             chains=chains,
+            presets=presets_dict,
             enable_optimizer=opt_conf.get("enable_optimizer", True),
             optimizer_model=opt_conf.get("optimizer_model", "gpt-4o-mini"),
             optimizer_timeout=float(opt_conf.get("optimizer_timeout", 15.0)),
