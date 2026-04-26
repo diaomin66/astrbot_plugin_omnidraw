@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1
-功能：防盗链突破(图片本地持久化+Base64注入) + 异步视频生成 + 模型动态切换
+功能：防盗链突破(图片本地持久化+Base64注入) + 异步视频生成 + 模型动态切换 + 完整参数解析
 """
 import os
 import base64
@@ -197,7 +197,6 @@ class OmniDrawPlugin(Star):
         yield event.plain_result(f"{MessageEmoji.PAINTING} 收到灵感，正在处理资源并绘制...")
         start_time = time.perf_counter()
         
-        # 🚀 在发给链之前，将图片全部转换为本地安全 Base64
         user_refs = await self._process_images_to_base64(raw_refs)
         user_ref = user_refs[0] if user_refs else ""
         
@@ -261,18 +260,20 @@ class OmniDrawPlugin(Star):
         
         yield event.plain_result(f"{MessageEmoji.INFO} 收到！正在下载您的参考图并提交后台任务，请稍候...")
         
-        # 🚀 突破防盗链并解析为多个 Base64 传递给后台幽灵任务
         user_refs = await self._process_images_to_base64(raw_refs)
-        
         asyncio.create_task(self.video_manager.background_task_runner(event, prompt, user_refs))
 
 
     # ==========================================
-    # 🤖 LLM 工具区 
+    # 🤖 LLM 工具区 (找回丢失的参数解析！)
     # ==========================================
     @llm_tool(name="generate_selfie")
     async def tool_generate_selfie(self, event: AstrMessageEvent, action: str) -> str:
-        """以此 AI 助理（我）的固定人设拍摄自拍。"""
+        """
+        以此 AI 助理（我）的固定人设拍摄自拍。
+        Args:
+            action (string): 动作和场景描述。纯动作描述即可，无需包含人物长相特征。
+        """
         if not self._has_permission(event):
             return "系统提示：当前用户没有权限使用自拍功能，请你委婉地拒绝他。"
 
@@ -300,14 +301,18 @@ class OmniDrawPlugin(Star):
 
     @llm_tool(name="generate_image")
     async def tool_generate_image(self, event: AstrMessageEvent, prompt: str) -> str:
-        """AI 画图工具。当用户提出明确的画面要求你画出来时调用此工具。"""
+        """
+        AI 画图工具。当用户提出明确的画面要求你画出来时调用此工具。
+        Args:
+            prompt (string): 扩写成英文的高质量动作与场景提示词。
+        """
         if not self._has_permission(event):
             return "系统提示：当前用户没有权限使用画图功能，请你委婉地拒绝他。"
 
         try:
             kwargs = {}
             raw_refs = self._get_event_images(event)
-            user_refs = await self._process_images_to_base64(raw_refs)
+            user_refs = await self._process_images_tobase64(raw_refs)
             if user_refs:
                 kwargs["user_ref"] = user_refs[0]
                 
@@ -327,7 +332,11 @@ class OmniDrawPlugin(Star):
 
     @llm_tool(name="generate_video")
     async def tool_generate_video(self, event: AstrMessageEvent, prompt: str) -> str:
-        """AI 视频生成工具。当用户提出明确的要求让你生成一段视频(mp4)时调用此工具。"""
+        """
+        AI 视频生成工具。当用户提出明确的要求让你生成一段视频(mp4)时调用此工具。
+        Args:
+            prompt (string): 扩写成英文的高质量视频场景和动作提示词。
+        """
         if not self._has_permission(event):
             return "系统提示：当前用户没有权限使用视频功能，请你委婉地拒绝他。"
 
