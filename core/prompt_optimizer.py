@@ -1,6 +1,5 @@
 """
 提示词副脑优化器 (Prompt Optimizer)
-功能：拦截简短动作，强制 LLM 输出超高维度的 JSON 结构，并将其展平为顶级英文提示词。
 """
 import json
 import re
@@ -14,7 +13,6 @@ class PromptOptimizer:
         self.config = config
 
     def _flatten_json_to_tags(self, data) -> list:
-        """递归遍历 JSON，把所有的字符串值提取成列表"""
         tags = []
         if isinstance(data, dict):
             for value in data.values():
@@ -27,7 +25,6 @@ class PromptOptimizer:
         return tags
 
     async def optimize(self, raw_action: str) -> str:
-        """核心优化函数：将简单的动作指令重写为结构化的神级提示词"""
         if not raw_action or raw_action.strip() == "":
             return raw_action
 
@@ -40,7 +37,6 @@ class PromptOptimizer:
         if not provider:
             return raw_action
             
-        # 🚀 修复 /v1/v1 叠加 Bug：智能补全或截断
         base_url = provider.base_url.rstrip("/")
         if base_url.endswith("/v1"):
             endpoint = f"{base_url}/chat/completions"
@@ -93,8 +89,11 @@ CRITICAL RULES:
 
         async with aiohttp.ClientSession() as session:
             try:
-                logger.info(f"🧠 [副脑拦截] 正在按 JSON 结构重构提示词 (模型: {self.config.optimizer_model})")
-                async with session.post(endpoint, headers=headers, json=payload, timeout=8.0) as resp:
+                # 🚀 获取 WebUI 设定的超时时间
+                timeout_val = self.config.optimizer_timeout
+                logger.info(f"🧠 [副脑拦截] 正在按 JSON 结构重构提示词 (模型: {self.config.optimizer_model}, 超时: {timeout_val}s)")
+                
+                async with session.post(endpoint, headers=headers, json=payload, timeout=timeout_val) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
                     
