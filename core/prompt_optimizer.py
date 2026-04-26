@@ -1,6 +1,6 @@
 """
 提示词副脑优化器 (Prompt Optimizer)
-功能：强制 LLM 开启 JSON 模式，输出高维度的 JSON 结构，并原汁原味地传递给底层画图 API。
+功能：强制 LLM 输出 JSON 格式，并物理级写死“防拼图”特征，确保百分百单图输出。
 """
 import json
 import re
@@ -27,12 +27,12 @@ class PromptOptimizer:
         endpoint = f"{base_url}/chat/completions" if base_url.endswith("/v1") else f"{base_url}/v1/chat/completions"
         headers = {"Authorization": f"Bearer {provider.api_keys[0]}", "Content-Type": "application/json"}
 
-        # 核心骨架
+        # 核心骨架（特别警告不准用多视图词汇）
         base_json_struct = """{
   "subject": {"appearance": "ultra-detailed skin texture, realistic pores", "body_type": "...", "accessories": "..."},
   "clothing": {"top": "...", "bottom": "...", "shoes": "..."},
   "pose_and_action": {
-    "pose": "[CRITICAL: EXACTLY ONE specific pose. NO multiple poses!]", 
+    "pose": "[CRITICAL: EXACTLY ONE specific pose. NEVER use words like 'various', 'multiple', 'different angles']", 
     "action": "[ONE specific action]", 
     "gaze": "..."
   },
@@ -55,7 +55,6 @@ CRITICAL RULES:
 2. ABSOLUTELY NO collages, grids, or multiple views. Describe exactly ONE single frozen moment.
 {base_json_struct}"""
         else:
-            # 批量模式：为了符合官方 json_object 要求，必须包裹在一个对象的 key 里
             sys_prompt = f"""You are an expert AI image prompt engineer.
 Generate EXACTLY {count} distinct variations of the user's action.
 CRITICAL RULES:
@@ -72,7 +71,6 @@ Format:
   ]
 }}"""
 
-        # 🚀 强开官方 JSON 模式 (response_format)
         payload = {
             "model": self.config.optimizer_model,
             "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": raw_action}],
@@ -84,7 +82,7 @@ Format:
         async with aiohttp.ClientSession() as session:
             try:
                 timeout_val = self.config.optimizer_timeout * (1.5 if count > 1 else 1.0)
-                logger.info(f"🧠 [副脑] 正在重构 {count} 组独立提示词 (强制纯 JSON 模式, 模型: {self.config.optimizer_model})")
+                logger.info(f"🧠 [副脑] 正在重构 {count} 组独立提示词 (双重防拼图模式, 模型: {self.config.optimizer_model})")
                 
                 async with session.post(endpoint, headers=headers, json=payload, timeout=timeout_val) as resp:
                     resp.raise_for_status()
@@ -94,29 +92,30 @@ Format:
                         raw_content = data["choices"][0]["message"]["content"].strip()
                         
                         try:
-                            # 提取 JSON 对象
                             prompt_data = json.loads(raw_content)
                             results = []
                             
+                            items = []
                             if count == 1:
-                                # 单张图，直接将 JSON 对象转回优雅的字符串保留结构
-                                json_str = json.dumps(prompt_data, ensure_ascii=False, indent=2)
-                                results.append(json_str)
+                                items = [prompt_data]
                             else:
-                                # 多张图，从 results 数组中提取每个对象，并保持 JSON 格式
                                 items = prompt_data.get("results", [])
                                 if not items and isinstance(prompt_data, list):
-                                    items = prompt_data # 极少数模型叛逆兜底
+                                    items = prompt_data
                                     
-                                for item in items:
-                                    json_str = json.dumps(item, ensure_ascii=False, indent=2)
-                                    results.append(json_str)
+                            for item in items:
+                                # 🚀【终极防拼图锁死】🚀
+                                # 不管大模型写了什么，Python 代码强行在最后塞入一个极其严厉的“防拼图强制标签”
+                                # 底层生图模型看到这些词，会立刻打消生成拼图的念头！
+                                item["HARDCODED_ANTI_COLLAGE_RULE"] = "1girl, solo, single image, one single frame, complete and unified scene, NO grid, NO collage, NO split screen, NO character sheet, NO multiple views, NO comic panels"
+                                
+                                json_str = json.dumps(item, ensure_ascii=False, indent=2)
+                                results.append(json_str)
                             
-                            # 补齐防呆
                             while len(results) < count:
                                 results.append(results[0] if results else raw_action)
                                 
-                            logger.info(f"✨ [副脑] 成功提取 {len(results[:count])} 组原生 JSON 提示词！")
+                            logger.info(f"✨ [副脑] 成功提取 {len(results[:count])} 组防拼图 JSON！")
                             return results[:count]
                             
                         except Exception as e:
