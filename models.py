@@ -1,6 +1,10 @@
+"""
+AstrBot 万象画卷插件 v3.1 - 数据模型
+"""
 import os
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
+from astrbot.api.utils import StarTools # 🚀 引入官方路径工具
 
 @dataclass
 class ProviderConfig:
@@ -20,7 +24,7 @@ class PluginConfig:
     enable_optimizer: bool        
     optimizer_model: str  
     optimizer_timeout: float  
-    max_batch_count: int      # 🚀 新增批量上限控制
+    max_batch_count: int      
     persona_name: str
     persona_base_prompt: str
     persona_ref_image: str
@@ -56,6 +60,7 @@ class PluginConfig:
                 available_models=available_models
             ))
 
+        # 保持你完美的卡片提取逻辑
         persona_conf = config_dict.get("persona_config", {})
         opt_conf = config_dict.get("optimizer_config", {})
         router_conf = config_dict.get("router_config", {})
@@ -69,9 +74,10 @@ class PluginConfig:
         elif isinstance(raw_image, str): ref_path = raw_image.strip()
             
         if ref_path and not ref_path.startswith("http") and not os.path.isabs(ref_path):
-            plugin_data_dir = os.path.join(os.getcwd(), "data", "plugin_data", "astrbot_plugin_omnidraw")
+            # 🚀 告别 os.getcwd() 硬编码，使用规范目录
+            plugin_data_dir = os.path.join(StarTools.get_data_dir(), "astrbot_plugin_omnidraw")
             target_path = os.path.abspath(os.path.join(plugin_data_dir, ref_path))
-            ref_path = target_path if os.path.exists(target_path) else os.path.abspath(os.path.join(os.getcwd(), "data", ref_path))
+            ref_path = target_path if os.path.exists(target_path) else os.path.abspath(os.path.join(StarTools.get_data_dir(), ref_path))
             
         chains = {
             "text2img": [p.strip() for p in router_conf.get("chain_text2img", "node_1").split(",") if p.strip()],
@@ -90,7 +96,7 @@ class PluginConfig:
             enable_optimizer=opt_conf.get("enable_optimizer", True),
             optimizer_model=opt_conf.get("optimizer_model", "gpt-4o-mini"),
             optimizer_timeout=float(opt_conf.get("optimizer_timeout", 15.0)),
-            max_batch_count=int(opt_conf.get("max_batch_count", 0)), # 🚀
+            max_batch_count=int(opt_conf.get("max_batch_count", 0)),
             persona_name=persona_conf.get("persona_name", "默认助理"),
             persona_base_prompt=persona_conf.get("persona_base_prompt", ""),
             persona_ref_image=ref_path,
