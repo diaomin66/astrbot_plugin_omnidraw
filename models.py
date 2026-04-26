@@ -1,6 +1,3 @@
-"""
-AstrBot 万象画卷插件 v3.1 - 数据模型
-"""
 import os
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
@@ -23,6 +20,7 @@ class PluginConfig:
     enable_optimizer: bool        
     optimizer_model: str  
     optimizer_timeout: float  
+    max_batch_count: int      # 🚀 新增批量上限控制
     persona_name: str
     persona_base_prompt: str
     persona_ref_image: str
@@ -58,7 +56,6 @@ class PluginConfig:
                 available_models=available_models
             ))
 
-        # 🚀 从对象卡片中提取配置
         persona_conf = config_dict.get("persona_config", {})
         opt_conf = config_dict.get("optimizer_config", {})
         router_conf = config_dict.get("router_config", {})
@@ -93,6 +90,7 @@ class PluginConfig:
             enable_optimizer=opt_conf.get("enable_optimizer", True),
             optimizer_model=opt_conf.get("optimizer_model", "gpt-4o-mini"),
             optimizer_timeout=float(opt_conf.get("optimizer_timeout", 15.0)),
+            max_batch_count=int(opt_conf.get("max_batch_count", 0)), # 🚀
             persona_name=persona_conf.get("persona_name", "默认助理"),
             persona_base_prompt=persona_conf.get("persona_base_prompt", ""),
             persona_ref_image=ref_path,
