@@ -5,7 +5,7 @@ import aiohttp
 import base64
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 from astrbot.api import logger
 from ..models import ProviderConfig
 
@@ -41,6 +41,21 @@ class BaseProvider(ABC):
         except Exception as e:
             logger.error(f"❌ 读取本地图片失败: {e}")
             return None
+
+    def get_reference_images(self, **kwargs: Any) -> List[str]:
+        refs: List[str] = []
+        for key in ("user_refs", "persona_refs"):
+            value = kwargs.get(key)
+            if isinstance(value, (list, tuple)):
+                refs.extend(str(item) for item in value if item)
+
+        for key in ("user_ref", "persona_ref"):
+            value = kwargs.get(key)
+            if value:
+                refs.append(str(value))
+
+        seen = set()
+        return [ref for ref in refs if not (ref in seen or seen.add(ref))]
 
     @abstractmethod
     async def generate_image(self, prompt: str, **kwargs: Any) -> str:

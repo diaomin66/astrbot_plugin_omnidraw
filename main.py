@@ -132,6 +132,14 @@ class OmniDrawPlugin(Star):
                         
         return processed_paths
 
+    def _normalize_count(self, count: Any) -> int:
+        try:
+            if isinstance(count, str):
+                count = count.strip()
+            return int(count)
+        except (TypeError, ValueError):
+            return 1
+
     def _has_permission(self, event: AstrMessageEvent) -> bool:
         allowed = self.plugin_config.allowed_users
         if not allowed: return True
@@ -229,7 +237,7 @@ class OmniDrawPlugin(Star):
         try:
             async with aiohttp.ClientSession() as session:
                 chain_manager = ChainManager(self.plugin_config, session)
-                image_url = await chain_manager.run_chain("text2img", preset_prompt, user_ref=safe_refs[0])
+                image_url = await chain_manager.run_chain("text2img", preset_prompt, user_refs=safe_refs)
                 
             yield event.chain_result([self._create_image_component(image_url)])
         except Exception as e:
@@ -250,7 +258,7 @@ class OmniDrawPlugin(Star):
         raw_refs = self._get_event_images(event)
         
         if not message and not raw_refs:
-            yield event.plain_result(f"{MessageEmoji.WARNING} 请输入提示词或附带一张参考图！")
+            yield event.plain_result(f"{MessageEmoji.WARNING} 请输入提示词或附带参考图！")
             return
             
         safe_refs = await self._process_and_save_images(raw_refs)
@@ -258,8 +266,8 @@ class OmniDrawPlugin(Star):
         
         actual_ref_count = 0
         if safe_refs:
-            kwargs["user_ref"] = safe_refs[0]
-            actual_ref_count = 1
+            kwargs["user_refs"] = safe_refs
+            actual_ref_count = len(safe_refs)
             
         yield event.plain_result(
             f"{MessageEmoji.PAINTING} 收到灵感，正在绘制...\n"
@@ -285,17 +293,19 @@ class OmniDrawPlugin(Star):
         optimized_action = opt_actions[0] if opt_actions else user_input
         
         final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(optimized_action)
-        persona_ref = extra_kwargs.get("user_ref", "")
+        persona_ref = extra_kwargs.get("persona_ref", "")
         raw_refs = self._get_event_images(event)
         target_refs = raw_refs if raw_refs else ([persona_ref] if persona_ref else [])
         
         safe_refs = await self._process_and_save_images(target_refs)
         actual_ref_count = 0
         if safe_refs:
-            extra_kwargs["user_ref"] = safe_refs[0]
-            actual_ref_count = 1
+            extra_kwargs["user_refs"] = safe_refs
+            actual_ref_count = len(safe_refs) + (1 if raw_refs and persona_ref else 0)
+            if not raw_refs:
+                extra_kwargs.pop("persona_ref", None)
         else:
-            extra_kwargs.pop("user_ref", None) 
+            extra_kwargs.pop("user_refs", None)
             
         yield event.plain_result(
             f"{MessageEmoji.INFO} 正在为「{self.plugin_config.persona_name}」生成自拍...\n"
@@ -350,7 +360,7 @@ class OmniDrawPlugin(Star):
         if not self._has_permission(event): return "系统提示：无权限调用。"
 
         try:
-            count = max(1, count)
+            count = max(1, self._normalize_count(count))
             if self.plugin_config.max_batch_count > 0:
                 count = min(count, self.plugin_config.max_batch_count)
             
@@ -368,7 +378,10 @@ class OmniDrawPlugin(Star):
             async with aiohttp.ClientSession() as session:
                 for opt_action in optimized_actions:
                     final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(opt_action)
-                    if safe_refs: extra_kwargs["user_ref"] = safe_refs[0]
+                    if safe_refs:
+                        extra_kwargs["user_refs"] = safe_refs
+                        if not raw_refs:
+                            extra_kwargs.pop("persona_ref", None)
                     chain_manager = ChainManager(self.plugin_config, session)
                     tasks.append(chain_manager.run_chain(chain_to_use, final_prompt, **extra_kwargs))
                 
@@ -400,7 +413,7 @@ class OmniDrawPlugin(Star):
         if not self._has_permission(event): return "系统提示：无权限调用。"
 
         try:
-            count = max(1, count)
+            count = max(1, self._normalize_count(count))
             if self.plugin_config.max_batch_count > 0:
                 count = min(count, self.plugin_config.max_batch_count)
                 
@@ -409,7 +422,7 @@ class OmniDrawPlugin(Star):
             optimized_actions = await self.prompt_optimizer.optimize(prompt, count)
             raw_refs = self._get_event_images(event)
             safe_refs = await self._process_and_save_images(raw_refs)
-            kwargs = {"user_ref": safe_refs[0]} if safe_refs else {}
+            kwargs = {"user_refs": safe_refs} if safe_refs else {}
 
             tasks = []
             async with aiohttp.ClientSession() as session:
@@ -444,7 +457,7 @@ class OmniDrawPlugin(Star):
         if not self._has_permission(event): return "系统提示：无权限调用。"
 
         try:
-            count = max(1, count)
+            count = max(1, self._normalize_count(count))
             if self.plugin_config.max_batch_count > 0: count = min(count, self.plugin_config.max_batch_count)
             raw_refs = self._get_event_images(event)
             safe_refs = await self._process_and_save_images(raw_refs)

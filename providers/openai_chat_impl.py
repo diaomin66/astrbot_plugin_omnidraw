@@ -39,11 +39,7 @@ class OpenAIChatProvider(BaseProvider):
         if not current_key:
             raise ValueError("节点未配置 API Key！")
 
-        persona_ref = kwargs.get("persona_ref")
-        user_ref = kwargs.get("user_ref")
-        
-        # 优先取用户的动作图，没有则取人设图
-        target_ref = user_ref or persona_ref
+        target_refs = self.get_reference_images(**kwargs)
 
         # ==========================================
         # 🚀 学习 Gitee AI 的标准 Vision 协议构造法
@@ -52,22 +48,27 @@ class OpenAIChatProvider(BaseProvider):
 
         # 1. ⚠️ 关键修正：图片必须在文字之前！
         # 绝大多数大模型是顺序读取 Token 的，必须让它先“看”到图，再“听”你的要求
-        if target_ref:
-            b64_image = await self._encode_image_to_base64(target_ref)
-            if b64_image:
-                user_content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": b64_image
-                    }
-                })
-                logger.info("✅ [Chat/Vision通道] 成功将参考图封装为视觉信号 (Image First)")
+        image_count = 0
+        for ref_image in target_refs:
+            b64_image = await self._encode_image_to_base64(ref_image)
+            if not b64_image:
+                continue
+            user_content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": b64_image
+                }
+            })
+            image_count += 1
+
+        if image_count:
+            logger.info(f"✅ [Chat/Vision通道] 成功将 {image_count} 张参考图封装为视觉信号 (Image First)")
 
         # 2. 注入提示词
         # ⚠️ 关键修正：抛弃 System 角色，将系统指令合并到 User 里，确保多模态网关不拦截
         full_prompt = (
             "You are a professional image generation assistant. "
-            "Based on the prompt and the reference image provided above, generate the corresponding image. "
+            "Based on the prompt and the reference image or images provided above, generate the corresponding image. "
             "Return ONLY the markdown image link: ![image](url). DO NOT output any extra conversational text.\n\n"
             f"Prompt: {prompt}"
         )

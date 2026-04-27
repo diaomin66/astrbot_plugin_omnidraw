@@ -34,26 +34,25 @@ class OpenAIProvider(BaseProvider):
             raise ValueError("节点未配置 API Key！")
 
         base_url = self.config.base_url.rstrip("/")
-        # 标准通道只支持一张图，优先取用户的动作图，没有动作图再去取人设图
-        ref_image = kwargs.get("user_ref") or kwargs.get("persona_ref")
+        ref_images = self.get_reference_images(**kwargs)
 
         # ==========================================
         # 📝 核心：打印最终发送给 API 的原味提示词
         # ==========================================
         logger.info(f"📝 [标准通道] 最终发送给 API 的提示词:\n{prompt}")
 
-        if ref_image:
-            # 🖼️ 图生图模式 (Image-to-Image / Edits)
+        if ref_images:
             url = base_url + "/images/edits"
-            logger.info("✅ 检测到参考图，正切换至标准改图通道: " + url)
-            
-            try:
-                image_bytes = await self._get_image_bytes(ref_image)
-            except Exception as e:
-                raise RuntimeError("读取参考图数据失败: " + str(e))
+            logger.info(f"✅ 检测到 {len(ref_images)} 张参考图，正切换至标准改图通道: {url}")
 
             data = aiohttp.FormData()
-            data.add_field('image', image_bytes, filename='reference.png', content_type='image/png')
+            for idx, ref_image in enumerate(ref_images, start=1):
+                try:
+                    image_bytes = await self._get_image_bytes(ref_image)
+                except Exception as e:
+                    raise RuntimeError(f"读取第 {idx} 张参考图数据失败: {e}")
+                data.add_field('image', image_bytes, filename=f'reference_{idx}.png', content_type='image/png')
+
             data.add_field('prompt', prompt)
             data.add_field('model', self.config.model)
             data.add_field('n', '1')
