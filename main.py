@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1
-功能：智能路由。手动接管参数解析，彻底杜绝命令无响应 Bug！
+功能：智能路由。全指令采用 *args 黑洞接收法，彻底杜绝参数被框架截断丢失的 Bug！
 """
 import os
 import base64
@@ -156,7 +156,6 @@ class OmniDrawPlugin(Star):
         else:
             return Image.fromURL(image_url)
 
-    # 🚀 更强壮的节点获取逻辑，确保找不到时优雅降级
     def _get_active_provider(self, chain_type: str = "text2img"):
         chain = self.plugin_config.chains.get(chain_type, [])
         if chain_type == "video":
@@ -172,7 +171,7 @@ class OmniDrawPlugin(Star):
         return None
 
     # ==========================================
-    # ⚙️ 极度防弹指令区 (接管底层参数解析)
+    # ⚙️ 极度防弹指令区 (使用 *args 彻底消灭丢参数 Bug)
     # ==========================================
     @filter.command("万象帮助")
     @handle_errors
@@ -184,18 +183,16 @@ class OmniDrawPlugin(Star):
                 msg += f"/{p}\n"
         yield event.plain_result(msg)
 
-    # 🚀 手动解析 message，绕过 AstrBot 的传参 Bug
     @filter.command("切换链路")
     @handle_errors
-    async def cmd_switch_chain(self, event: AstrMessageEvent, message: str = "") -> AsyncGenerator[Any, None]:
+    async def cmd_switch_chain(self, event: AstrMessageEvent, *args) -> AsyncGenerator[Any, None]:
         try:
             if not self._has_permission(event):
                 yield event.plain_result(f"{MessageEmoji.WARNING} 暂无权限！")
                 return
 
-            args = message.strip().split()
-            target_chain = args[0] if len(args) > 0 else ""
-            target_node = args[1] if len(args) > 1 else ""
+            target_chain = str(args[0]) if len(args) > 0 else ""
+            target_node = str(args[1]) if len(args) > 1 else ""
 
             chain_map = {"画图": "text2img", "自拍": "selfie", "视频": "video"}
 
@@ -215,6 +212,10 @@ class OmniDrawPlugin(Star):
                 yield event.plain_result(msg)
                 return
 
+            if not target_node:
+                yield event.plain_result(f"{MessageEmoji.ERROR} 请输入要切换的节点 ID！例如：/切换链路 {target_chain} 节点名字")
+                return
+
             chain_key = chain_map[target_chain]
             
             new_provider = None
@@ -224,7 +225,7 @@ class OmniDrawPlugin(Star):
                 new_provider = self.plugin_config.get_provider(target_node)
                 
             if not new_provider:
-                yield event.plain_result(f"{MessageEmoji.ERROR} 找不到节点 [{target_node}]！请确认节点 ID 拼写正确。")
+                yield event.plain_result(f"{MessageEmoji.ERROR} 找不到节点 [{target_node}]！请确认拼写正确。")
                 return
 
             self.plugin_config.chains[chain_key] = [target_node]
@@ -233,29 +234,26 @@ class OmniDrawPlugin(Star):
             logger.error(f"切换链路崩溃: {e}")
             yield event.plain_result(f"💥 内部错误: {e}")
 
-    # 🚀 手动解析 message，支持智能推导
     @filter.command("切换模型")
     @handle_errors
-    async def cmd_switch_model(self, event: AstrMessageEvent, message: str = "") -> AsyncGenerator[Any, None]:
+    async def cmd_switch_model(self, event: AstrMessageEvent, *args) -> AsyncGenerator[Any, None]:
         try:
             if not self._has_permission(event):
                 yield event.plain_result(f"{MessageEmoji.WARNING} 暂无权限！")
                 return
                 
-            args = message.strip().split()
+            arg1 = str(args[0]) if len(args) > 0 else ""
+            arg2 = str(args[1]) if len(args) > 1 else ""
+            
             target_chain = "画图"
             target_idx = ""
             
-            if len(args) == 1:
-                if args[0].isdigit():
-                    target_idx = args[0]
-                else:
-                    target_chain = args[0]
-            elif len(args) >= 2:
-                target_chain = args[0]
-                target_idx = args[1]
-                
-            if target_chain not in ["画图", "自拍", "视频"]:
+            if arg1.isdigit():
+                target_idx = arg1
+            elif arg1 in ["画图", "自拍", "视频"]:
+                target_chain = arg1
+                target_idx = arg2
+            elif arg1:
                 yield event.plain_result(f"{MessageEmoji.ERROR} 无法识别的链路名。支持：画图 / 自拍 / 视频")
                 return
 
@@ -334,16 +332,16 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(f"💥 绘制失败: {e}")
 
     # ==========================================
-    # 常规指令区
+    # 常规指令区 (全部修复为 *args)
     # ==========================================
     @filter.command("画")
     @handle_errors
-    async def cmd_draw(self, event: AstrMessageEvent, message: str = "") -> AsyncGenerator[Any, None]:
+    async def cmd_draw(self, event: AstrMessageEvent, *args) -> AsyncGenerator[Any, None]:
         if not self._has_permission(event):
             yield event.plain_result(f"{MessageEmoji.WARNING} 抱歉，暂无权限！")
             return
 
-        message = message.strip()
+        message = " ".join(str(a) for a in args).strip()
         raw_refs = self._get_event_images(event)
         
         if not message and not raw_refs:
@@ -372,12 +370,14 @@ class OmniDrawPlugin(Star):
 
     @filter.command("自拍")
     @handle_errors
-    async def cmd_selfie(self, event: AstrMessageEvent, message: str = "") -> AsyncGenerator[Any, None]:
+    async def cmd_selfie(self, event: AstrMessageEvent, *args) -> AsyncGenerator[Any, None]:
         if not self._has_permission(event):
             yield event.plain_result(f"{MessageEmoji.WARNING} 抱歉，暂无权限！")
             return
 
-        user_input = message.strip() if message else "看着镜头微笑"
+        message = " ".join(str(a) for a in args).strip()
+        user_input = message if message else "看着镜头微笑"
+        
         opt_actions = await self.prompt_optimizer.optimize(user_input, count=1)
         optimized_action = opt_actions[0] if opt_actions else user_input
         
@@ -411,12 +411,12 @@ class OmniDrawPlugin(Star):
 
     @filter.command("视频")
     @handle_errors
-    async def cmd_video(self, event: AstrMessageEvent, message: str = "") -> AsyncGenerator[Any, None]:
+    async def cmd_video(self, event: AstrMessageEvent, *args) -> AsyncGenerator[Any, None]:
         if not self._has_permission(event):
             yield event.plain_result(f"{MessageEmoji.WARNING} 抱歉，暂无权限！")
             return
 
-        message = message.strip()
+        message = " ".join(str(a) for a in args).strip()
         raw_refs = self._get_event_images(event)
         
         if not message and not raw_refs:
@@ -435,7 +435,7 @@ class OmniDrawPlugin(Star):
         asyncio.create_task(self.video_manager.background_task_runner(event, prompt, safe_refs))
 
     # ==========================================
-    # 🤖 LLM 工具区 (参数已全量补回 + 防删注释)
+    # 🤖 LLM 工具区
     # ==========================================
     @llm_tool(name="generate_selfie")
     async def tool_generate_selfie(self, event: AstrMessageEvent, action: str, count: int = 1) -> str:
