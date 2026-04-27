@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1
-功能：智能路由。新增动态链路切换与多维度模型无缝联动，保持雷达与LLM全能态！
+功能：智能路由。手动接管参数解析，彻底杜绝命令无响应 Bug！
 """
 import os
 import base64
@@ -49,9 +49,6 @@ class OmniDrawPlugin(Star):
         self.video_manager = VideoManager(self.plugin_config)
         self.prompt_optimizer = PromptOptimizer(self.plugin_config) 
 
-    # ==========================================
-    # 🚀 终极杀手锏：全自动递归嗅探雷达
-    # ==========================================
     def _get_event_images(self, event: AstrMessageEvent) -> list:
         images = []
         visited = set()
@@ -159,19 +156,23 @@ class OmniDrawPlugin(Star):
         else:
             return Image.fromURL(image_url)
 
-    # 🚀 升级：支持多维度查询当前激活的节点
+    # 🚀 更强壮的节点获取逻辑，确保找不到时优雅降级
     def _get_active_provider(self, chain_type: str = "text2img"):
         chain = self.plugin_config.chains.get(chain_type, [])
         if chain_type == "video":
-            if chain: return self.plugin_config.get_video_provider(chain[0])
+            if chain: 
+                prov = self.plugin_config.get_video_provider(chain[0])
+                if prov: return prov
             if self.plugin_config.video_providers: return self.plugin_config.video_providers[0]
         else:
-            if chain: return self.plugin_config.get_provider(chain[0])
+            if chain: 
+                prov = self.plugin_config.get_provider(chain[0])
+                if prov: return prov
             if self.plugin_config.providers: return self.plugin_config.providers[0]
         return None
 
     # ==========================================
-    # ⚙️ 指令与管理区
+    # ⚙️ 极度防弹指令区 (接管底层参数解析)
     # ==========================================
     @filter.command("万象帮助")
     @handle_errors
@@ -183,95 +184,113 @@ class OmniDrawPlugin(Star):
                 msg += f"/{p}\n"
         yield event.plain_result(msg)
 
+    # 🚀 手动解析 message，绕过 AstrBot 的传参 Bug
     @filter.command("切换链路")
     @handle_errors
-    async def cmd_switch_chain(self, event: AstrMessageEvent, target_chain: str = "", target_node: str = "") -> AsyncGenerator[Any, None]:
-        if not self._has_permission(event):
-            yield event.plain_result(f"{MessageEmoji.WARNING} 暂无权限！")
-            return
+    async def cmd_switch_chain(self, event: AstrMessageEvent, message: str = "") -> AsyncGenerator[Any, None]:
+        try:
+            if not self._has_permission(event):
+                yield event.plain_result(f"{MessageEmoji.WARNING} 暂无权限！")
+                return
 
-        chain_map = {"画图": "text2img", "自拍": "selfie", "视频": "video"}
+            args = message.strip().split()
+            target_chain = args[0] if len(args) > 0 else ""
+            target_node = args[1] if len(args) > 1 else ""
 
-        if not target_chain or target_chain not in chain_map:
-            # 未提供参数，显示当前所有链路的状态
-            msg = "🔗 当前链路路由状态：\n"
-            for cn, ck in chain_map.items():
-                prov = self._get_active_provider(ck)
-                prov_id = prov.id if prov else "未配置"
-                msg += f"[{cn}]: 绑定节点 -> {prov_id}\n"
+            chain_map = {"画图": "text2img", "自拍": "selfie", "视频": "video"}
+
+            if not target_chain or target_chain not in chain_map:
+                msg = "🔗 当前链路路由状态：\n"
+                for cn, ck in chain_map.items():
+                    prov = self._get_active_provider(ck)
+                    prov_id = prov.id if prov else "未配置"
+                    msg += f"[{cn}]: 绑定节点 -> {prov_id}\n"
+                
+                provider_ids = [p.id for p in self.plugin_config.providers] if self.plugin_config.providers else ["无"]
+                video_provider_ids = [p.id for p in self.plugin_config.video_providers] if self.plugin_config.video_providers else ["无"]
+                
+                msg += "\n🎨 可用生图节点: " + ", ".join(provider_ids)
+                msg += "\n🎬 可用视频节点: " + ", ".join(video_provider_ids)
+                msg += "\n\n💡 切换指令: /切换链路 [画图/自拍/视频] [节点ID]"
+                yield event.plain_result(msg)
+                return
+
+            chain_key = chain_map[target_chain]
             
-            msg += "\n🎨 可用生图节点: " + ", ".join([p.id for p in self.plugin_config.providers])
-            msg += "\n🎬 可用视频节点: " + ", ".join([p.id for p in self.plugin_config.video_providers])
-            msg += "\n\n💡 切换指令: /切换链路 [画图/自拍/视频] [节点ID]"
-            yield event.plain_result(msg)
-            return
+            new_provider = None
+            if chain_key == "video":
+                new_provider = self.plugin_config.get_video_provider(target_node)
+            else:
+                new_provider = self.plugin_config.get_provider(target_node)
+                
+            if not new_provider:
+                yield event.plain_result(f"{MessageEmoji.ERROR} 找不到节点 [{target_node}]！请确认节点 ID 拼写正确。")
+                return
 
-        chain_key = chain_map[target_chain]
-        
-        # 验证要切换到的节点是否存在
-        new_provider = None
-        if chain_key == "video":
-            new_provider = self.plugin_config.get_video_provider(target_node)
-        else:
-            new_provider = self.plugin_config.get_provider(target_node)
-            
-        if not new_provider:
-            yield event.plain_result(f"{MessageEmoji.ERROR} 找不到节点 [{target_node}]！请检查配置。")
-            return
+            self.plugin_config.chains[chain_key] = [target_node]
+            yield event.plain_result(f"✅ 成功将 [{target_chain}] 链路切换至节点: {target_node}\n💡 现在使用 /切换模型 {target_chain} 将显示该节点下的可用模型！")
+        except Exception as e:
+            logger.error(f"切换链路崩溃: {e}")
+            yield event.plain_result(f"💥 内部错误: {e}")
 
-        # 执行切换 (内存中修改)
-        self.plugin_config.chains[chain_key] = [target_node]
-        yield event.plain_result(f"✅ 成功将 [{target_chain}] 链路切换至节点: {target_node}\n💡 现在使用 /切换模型 {target_chain} 将显示该节点下的模型！")
-
+    # 🚀 手动解析 message，支持智能推导
     @filter.command("切换模型")
     @handle_errors
-    async def cmd_switch_model(self, event: AstrMessageEvent, arg1: str = "", arg2: str = "") -> AsyncGenerator[Any, None]:
-        if not self._has_permission(event):
-            yield event.plain_result(f"{MessageEmoji.WARNING} 暂无权限！")
-            return
+    async def cmd_switch_model(self, event: AstrMessageEvent, message: str = "") -> AsyncGenerator[Any, None]:
+        try:
+            if not self._has_permission(event):
+                yield event.plain_result(f"{MessageEmoji.WARNING} 暂无权限！")
+                return
+                
+            args = message.strip().split()
+            target_chain = "画图"
+            target_idx = ""
             
-        # 🚀 智能参数识别：支持 "/切换模型 2" 或 "/切换模型 视频 2"
-        target_chain = "画图"
-        target_idx = ""
-        
-        if arg1.isdigit():
-            target_idx = arg1
-        elif arg1 in ["画图", "自拍", "视频"]:
-            target_chain = arg1
-            target_idx = arg2
-        elif arg1:
-            yield event.plain_result(f"{MessageEmoji.ERROR} 无法识别的链路名。支持：画图 / 自拍 / 视频")
-            return
+            if len(args) == 1:
+                if args[0].isdigit():
+                    target_idx = args[0]
+                else:
+                    target_chain = args[0]
+            elif len(args) >= 2:
+                target_chain = args[0]
+                target_idx = args[1]
+                
+            if target_chain not in ["画图", "自拍", "视频"]:
+                yield event.plain_result(f"{MessageEmoji.ERROR} 无法识别的链路名。支持：画图 / 自拍 / 视频")
+                return
 
-        chain_map = {"画图": "text2img", "自拍": "selfie", "视频": "video"}
-        chain_key = chain_map[target_chain]
-        
-        provider = self._get_active_provider(chain_key)
-
-        if not provider or not provider.available_models:
-            yield event.plain_result(f"{MessageEmoji.WARNING} [{target_chain}] 链路当前绑定的节点暂无可用模型！")
-            return
-
-        if not target_idx:
-            msg = f"⚙️ [{target_chain}] 当前节点 [{provider.id}] 的可用模型：\n"
-            for i, m in enumerate(provider.available_models):
-                is_active = " 👈(当前)" if m == provider.model else ""
-                msg += f"[{i+1}] {m}{is_active}\n"
-            msg += f"\n💡 指令: /切换模型 {target_chain if target_chain != '画图' else ''} [序号]"
-            yield event.plain_result(msg)
-            return
-
-        selected_model = target_idx if target_idx in provider.available_models else (provider.available_models[int(target_idx)-1] if target_idx.isdigit() and 0 <= int(target_idx)-1 < len(provider.available_models) else None)
-        
-        if not selected_model:
-            yield event.plain_result(f"{MessageEmoji.ERROR} 找不到该模型！")
-            return
+            chain_map = {"画图": "text2img", "自拍": "selfie", "视频": "video"}
+            chain_key = chain_map[target_chain]
             
-        provider.model = selected_model
-        yield event.plain_result(f"✅ [{target_chain}] 已切换至模型：{selected_model}")
+            provider = self._get_active_provider(chain_key)
+
+            if not provider or not provider.available_models:
+                yield event.plain_result(f"{MessageEmoji.WARNING} [{target_chain}] 链路当前绑定的节点暂无可用模型！")
+                return
+
+            if not target_idx:
+                msg = f"⚙️ [{target_chain}] 当前节点 [{provider.id}] 的可用模型：\n"
+                for i, m in enumerate(provider.available_models):
+                    is_active = " 👈(当前)" if m == provider.model else ""
+                    msg += f"[{i+1}] {m}{is_active}\n"
+                msg += f"\n💡 指令: /切换模型 {target_chain if target_chain != '画图' else ''} [序号]"
+                yield event.plain_result(msg)
+                return
+
+            selected_model = target_idx if target_idx in provider.available_models else (provider.available_models[int(target_idx)-1] if target_idx.isdigit() and 0 <= int(target_idx)-1 < len(provider.available_models) else None)
+            
+            if not selected_model:
+                yield event.plain_result(f"{MessageEmoji.ERROR} 找不到该序号的模型！")
+                return
+                
+            provider.model = selected_model
+            yield event.plain_result(f"✅ [{target_chain}] 已成功切换至模型：{selected_model}")
+        except Exception as e:
+            logger.error(f"切换模型崩溃: {e}")
+            yield event.plain_result(f"💥 内部错误: {e}")
 
     # ==========================================
-    # 🚀 预设雷达拦截器：兼容任意指令前缀
+    # 🚀 预设雷达拦截器
     # ==========================================
     @filter.event_message_type(EventMessageType.ALL)
     async def on_message_preset(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
