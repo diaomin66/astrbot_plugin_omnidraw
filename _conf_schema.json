@@ -88,18 +88,20 @@
   },
   "video_providers": {
     "description": "🎬 API 视频节点配置",
-    "hint": "支持配置各大主流视频模型接口 (如 Kling, Luma, Runway, OpenAI 等)",
+    "hint": "支持配置各大主流视频模型接口",
     "type": "template_list",
     "items": {
       "type": "object",
       "keys": {
         "id": { "description": "节点ID", "type": "string", "default": "video_node_1" },
         "api_type": { 
-            "description": "接口模式", 
-            "hint": "async_task: 异步轮询(专属视频API) | openai_sync: 同步直返(Sora等) | openai_chat: 对话伪装视频(中转API)",
             "type": "string", 
-            "options": ["async_task", "openai_sync", "openai_chat"], 
-            "default": "async_task"
+            "options": [
+                "async_task (异步排队轮询 - 推荐Kling/Luma/Runway)", 
+                "openai_sync (同步阻塞直返 - 适合Sora等官方接口)", 
+                "openai_chat (对话伪装视频 - 适合各路中转API)"
+            ], 
+            "default": "async_task (异步排队轮询 - 推荐Kling/Luma/Runway)"
         },
         "base_url": { "description": "接口地址 (需包含版本号如 /v1 或 /v2)", "type": "string", "default": "https://api.example.com/v1" },
         "api_keys": { "description": "密钥池 (一行一个)", "type": "text", "default": "" },
@@ -112,7 +114,7 @@
         "name": "➕ 添加视频节点",
         "items": {
           "id": { "type": "string", "default": "video_node_1" },
-          "api_type": { "type": "string", "options": ["async_task", "openai_sync", "openai_chat"], "default": "async_task" },
+          "api_type": { "type": "string", "default": "async_task (异步排队轮询 - 推荐Kling/Luma/Runway)" },
           "base_url": { "type": "string", "default": "https://api.example.com/v1" },
           "api_keys": { "type": "text", "default": "sk-xxxxxx" },
           "model": { "type": "string", "default": "kling-v1" },
