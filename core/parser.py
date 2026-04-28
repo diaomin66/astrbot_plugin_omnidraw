@@ -1,35 +1,36 @@
-"""
-AstrBot 万象画卷插件 v1.0.0
-
-功能描述：
-- 指令参数解析器
-
-作者: your_name
-版本: 1.0.0
-日期: 2026-04-25
-"""
-
 import re
 from typing import Tuple, Dict, Any
 
 class CommandParser:
-    """指令参数解析器类"""
-
-    def __init__(self):
-        # 编译正则表达式（只编译一次）
-        self.param_pattern = re.compile(r'--([a-zA-Z0-9_-]+)\s+([^\s]+)')
-
-    def parse(self, raw_input: str) -> Tuple[str, Dict[str, Any]]:
-        """解析用户输入，分离提示词和高级参数"""
-        kwargs: Dict[str, Any] = {}
+    def parse(self, message: str) -> Tuple[str, Dict[str, Any]]:
+        """
+        高级多模态参数解析器 (兼容 gptimage2 / Gemini Image 等高阶代理模型)
+        精准切分提示词与 --key value 参数
+        """
+        kwargs = {}
+        # 以空格紧接 -- 作为分割前瞻，防止截断普通文本里的普通连字符 (如 mid-journey)
+        parts = re.split(r'(?=\s--[a-zA-Z0-9_-]+)', " " + message)
         
-        matches = self.param_pattern.findall(raw_input)
-        for key, value in matches:
-            kwargs[key] = value
-
-        clean_prompt = self.param_pattern.sub('', raw_input).strip()
+        prompt = parts[0].strip()
         
-        if 'seed' in kwargs and kwargs['seed'].isdigit():
-            kwargs['seed'] = int(kwargs['seed'])
+        for part in parts[1:]:
+            part = part.strip()
+            if not part.startswith('--'):
+                prompt += " " + part
+                continue
+                
+            # 剔除 '--'
+            part = part[2:]
             
-        return clean_prompt, kwargs
+            # 分离 key 和 value
+            kv = part.split(maxsplit=1)
+            if not kv:
+                continue
+                
+            key = kv[0]
+            # 如果没有值（例如单纯的 --hd），则赋值为 True 
+            value = kv[1].strip() if len(kv) > 1 else True
+            
+            kwargs[key] = value
+            
+        return prompt, kwargs
