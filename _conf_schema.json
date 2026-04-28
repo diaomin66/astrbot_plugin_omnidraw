@@ -75,12 +75,12 @@
       "openai_node": {
         "name": "➕ 添加生图节点",
         "items": {
-          "id": { "description": "节点ID", "type": "string", "default": "node_1" },
-          "api_type": { "description": "接口模式", "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
-          "base_url": { "description": "接口地址", "type": "string", "default": "https://api.openai.com/v1" },
-          "api_keys": { "description": "密钥池", "type": "text", "default": "sk-xxxxxx" },
-          "model": { "description": "模型名称", "type": "string", "default": "banana" },
-          "timeout": { "description": "超时时间", "type": "string", "default": "60" }
+          "id": { "type": "string", "default": "node_1" },
+          "api_type": { "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
+          "base_url": { "type": "string", "default": "https://api.openai.com/v1" },
+          "api_keys": { "type": "text", "default": "sk-xxxxxx" },
+          "model": { "type": "string", "default": "banana" },
+          "timeout": { "type": "string", "default": "60" }
         }
       }
     },
@@ -95,7 +95,8 @@
       "keys": {
         "id": { "description": "节点ID", "type": "string", "default": "video_node_1" },
         "api_type": { 
-            "description": "接口模式 (核心)", 
+            "description": "接口模式", 
+            "hint": "async_task: 异步轮询(专属视频API) | openai_sync: 同步直返(Sora等) | openai_chat: 对话伪装视频(中转API)",
             "type": "string", 
             "options": ["async_task", "openai_sync", "openai_chat"], 
             "default": "async_task"
@@ -103,12 +104,12 @@
         "base_url": { "description": "接口地址 (需包含版本号如 /v1 或 /v2)", "type": "string", "default": "https://api.example.com/v1" },
         "api_keys": { "description": "密钥池 (一行一个)", "type": "text", "default": "" },
         "model": { "description": "视频模型名称 (多个逗号隔开)", "type": "string", "default": "kling-v1" },
-        "timeout": { "description": "超时或最大轮询时间(秒)", "type": "string", "default": "300" }
+        "timeout": { "description": "超时或最大轮询时间(秒)", "type": "string", "default": "600" }
       }
     },
     "templates": {
-      "kling_luma_node": {
-        "name": "➕ 添加异步视频节点 (Kling/Luma/Runway)",
+      "video_node": {
+        "name": "➕ 添加视频节点",
         "items": {
           "id": { "type": "string", "default": "video_node_1" },
           "api_type": { "type": "string", "options": ["async_task", "openai_sync", "openai_chat"], "default": "async_task" },
