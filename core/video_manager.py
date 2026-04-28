@@ -1,6 +1,6 @@
 """
 视频任务后台挂机引擎 (Background Polling Task)
-功能：修复了部分魔改 API (如 "data" 为字典且使用 "output" 字段) 成功但获取不到 URL 的解析 Bug。
+功能：支持直观中文下拉菜单解析，修复了 UI 面板缺乏说明的痛点。
 """
 import re
 import time
@@ -75,23 +75,18 @@ class VideoManager:
                     logger.info(f"⏳ [视频轮询] Task ID: {task_id}, 状态: {status} (尝试 {attempt+1}/{max_retries})")
 
                     if status in ["SUCCESS", "SUCCEEDED", "COMPLETED"]:
-                        # 🚀 无死角嗅探：支持最外层的 url, video_url, output
                         video_url = data.get("video_url", data.get("url", data.get("output", "")))
                         
-                        # 如果最外层没找到，去 "data" 字段里找
                         if not video_url and "data" in data:
                             data_field = data["data"]
                             if isinstance(data_field, list) and len(data_field) > 0:
-                                # 兼容标准规范：data 是数组
                                 video_url = data_field[0].get("url", data_field[0].get("output", data_field[0].get("video_url", "")))
                             elif isinstance(data_field, dict):
-                                # 兼容魔改规范：data 是字典（完美解决你截图中的 Bug）
                                 video_url = data_field.get("output", data_field.get("url", data_field.get("video_url", "")))
                                 
                         if video_url:
                             return video_url
                         else:
-                            # 加上返回的原始结构，以防未来还有更奇葩的格式
                             raise VideoTaskError(f"任务显示成功，但未找到视频 URL！API 返回数据: {data}")
                             
                     elif status in ["FAIL", "FAILED", "FAILURE"]:
@@ -117,7 +112,7 @@ class VideoManager:
         }
         
         base_url = provider.base_url.rstrip("/")
-        api_type = provider.api_type 
+        api_type = str(provider.api_type).strip() # 获取长长的中文选项
         
         async with aiohttp.ClientSession() as session:
             b64_images = []
@@ -126,7 +121,8 @@ class VideoManager:
                 if b64:
                     b64_images.append(b64)
 
-            if api_type == "async_task":
+            # 🚀 兼容长中文：只判断开头
+            if api_type.startswith("async_task"):
                 endpoint = f"{base_url}/videos/generations"
                 payload = {"model": provider.model, "prompt": prompt}
                 if b64_images:
@@ -149,7 +145,7 @@ class VideoManager:
                 logger.info(f"✅ 任务提交成功，获得 Task ID: {task_id}，即将进入轮询...")
                 return await self._poll_task_result(provider, str(task_id), session)
 
-            elif api_type == "openai_sync":
+            elif api_type.startswith("openai_sync"):
                 endpoint = f"{base_url}/videos/generations"
                 payload = {"model": provider.model, "prompt": prompt}
                 if b64_images:
@@ -161,7 +157,6 @@ class VideoManager:
                     resp.raise_for_status()
                     data = await resp.json()
                     
-                    # 同步接口的格式也一并加上无死角解析
                     video_url = data.get("url", data.get("output", ""))
                     if not video_url and "data" in data:
                         if isinstance(data["data"], list) and len(data["data"]) > 0:
@@ -173,7 +168,7 @@ class VideoManager:
                         return video_url
                     raise VideoTaskError(f"Generations 同步返回值异常，未找到视频链接: {data}")
 
-            elif api_type == "openai_chat":
+            elif api_type.startswith("openai_chat"):
                 endpoint = f"{base_url}/chat/completions"
                 content = [{"type": "text", "text": prompt}]
                 for b64_img in b64_images:
@@ -190,7 +185,7 @@ class VideoManager:
                     raise VideoTaskError(f"Chat 返回值异常: {data}")
 
             else:
-                raise ValueError(f"不受支持的接口模式: {api_type}，请在后台配置正确类型！")
+                raise ValueError(f"不受支持的接口模式: {api_type}，请在后台重新选择下拉菜单！")
 
     async def background_task_runner(self, event: AstrMessageEvent, prompt: str, image_urls: list = None):
         start_time = time.perf_counter()
