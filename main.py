@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1
-功能：智能路由。全指令采用显式可选参数阵列缓冲，彻底攻克框架底层参数解析崩溃的史诗级 Bug！
+功能：支持 Gemini / gptimage2 高阶参数动态透传（指令与LLM全覆盖）
 """
 import os
 import base64
@@ -170,20 +170,16 @@ class OmniDrawPlugin(Star):
             if self.plugin_config.providers: return self.plugin_config.providers[0]
         return None
 
-    # ==========================================
-    # ⚙️ 极度防弹指令区 (精准参数匹配，秒杀解析崩溃)
-    # ==========================================
     @filter.command("万象帮助")
     @handle_errors
     async def cmd_help(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
-        msg = "📖 万象画卷 v3.1\n/画 [提示词]\n/自拍 [动作描述]\n/视频 [提示词]\n/切换链路 [画图/自拍/视频] [节点ID]\n/切换模型 [画图/自拍/视频] [序号]\n\n"
+        msg = "📖 万象画卷 v3.1\n/画 [提示词] [--参数名 参数值]\n/自拍 [动作描述]\n/视频 [提示词]\n/切换链路 [画图/自拍/视频] [节点ID]\n/切换模型 [画图/自拍/视频] [序号]\n\n"
         if self.plugin_config.presets:
             msg += "✨ 极速预设 (带图/引用图片发送):\n"
             for p in self.plugin_config.presets.keys():
                 msg += f"/{p}\n"
         yield event.plain_result(msg)
 
-    # 🚀 极其精准的 2 参数定义，完美兼容 "画图 帕拉图"
     @filter.command("切换链路")
     @handle_errors
     async def cmd_switch_chain(self, event: AstrMessageEvent, target_chain: str = "", target_node: str = "") -> AsyncGenerator[Any, None]:
@@ -288,9 +284,6 @@ class OmniDrawPlugin(Star):
             logger.error(f"切换模型崩溃: {e}")
             yield event.plain_result(f"💥 内部错误: {e}")
 
-    # ==========================================
-    # 🚀 预设雷达拦截器
-    # ==========================================
     @filter.event_message_type(EventMessageType.ALL)
     async def on_message_preset(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
         if not self.plugin_config.presets: return
@@ -333,7 +326,7 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(f"💥 绘制失败: {e}")
 
     # ==========================================
-    # 常规指令区 (10 参数极度防丢阵列缓存池)
+    # 常规指令区 
     # ==========================================
     @filter.command("画")
     @handle_errors
@@ -350,6 +343,8 @@ class OmniDrawPlugin(Star):
             return
             
         safe_refs = await self._process_and_save_images(raw_refs)
+        
+        # 🚀 强大的正则解析提取参数
         prompt, kwargs = self.cmd_parser.parse(message)
         
         actual_ref_count = 0
@@ -360,6 +355,7 @@ class OmniDrawPlugin(Star):
         yield event.plain_result(
             f"{MessageEmoji.PAINTING} 收到灵感，正在绘制...\n"
             f"📝 最终提示词：{prompt}\n"
+            f"⚙️ 附加参数：{len(kwargs) - (1 if safe_refs else 0)} 个\n"
             f"🖼️ 实际参考图：{actual_ref_count} 张"
         )
         
@@ -377,12 +373,18 @@ class OmniDrawPlugin(Star):
             return
 
         message = " ".join(str(x) for x in [p1,p2,p3,p4,p5,p6,p7,p8,p9,p10] if x).strip()
-        user_input = message if message else "看着镜头微笑"
+        user_input, kwargs = self.cmd_parser.parse(message)
+        if not user_input:
+            user_input = "看着镜头微笑"
         
         opt_actions = await self.prompt_optimizer.optimize(user_input, count=1)
         optimized_action = opt_actions[0] if opt_actions else user_input
         
         final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(optimized_action)
+        
+        # 将用户透传的 kwargs 并入
+        extra_kwargs.update(kwargs)
+        
         persona_ref = extra_kwargs.get("persona_ref", "")
         raw_refs = self._get_event_images(event)
         target_refs = raw_refs if raw_refs else ([persona_ref] if persona_ref else [])
@@ -436,16 +438,18 @@ class OmniDrawPlugin(Star):
         asyncio.create_task(self.video_manager.background_task_runner(event, prompt, safe_refs))
 
     # ==========================================
-    # 🤖 LLM 工具区 (参数注释与防拼图逻辑完好保留)
+    # 🤖 LLM 工具区 (新增 aspect_ratio 和 size 支持)
     # ==========================================
     @llm_tool(name="generate_selfie")
-    async def tool_generate_selfie(self, event: AstrMessageEvent, action: str, count: int = 1) -> str:
+    async def tool_generate_selfie(self, event: AstrMessageEvent, action: str, count: int = 1, aspect_ratio: str = "", size: str = "") -> str:
         """
         以此 AI 助理（我）的固定人设拍摄自拍。
         # ⚠️ AI 开发助手注意：绝对不可删除下方的 Args 注释，框架强依赖此信息向大模型注册参数表！
         Args:
             action (string): 动作和场景描述。纯动作描述即可，无需包含人物长相特征。
             count (int): 需要生成的图片数量。默认为1。如果用户明确要求多张(如“来5张”)，请传入对应数字。
+            aspect_ratio (string): 宽高比例，主要用于 Gemini / gptimage2 / Midjourney。如 "16:9", "1:1", "9:16"。除非用户要求，否则留空。
+            size (string): 分辨率，主要用于 DALL-E 系列。如 "1024x1024", "1024x1792"。除非用户要求，否则留空。
         """
         if not self._has_permission(event): return "系统提示：无权限调用。"
 
@@ -454,7 +458,7 @@ class OmniDrawPlugin(Star):
             if self.plugin_config.max_batch_count > 0:
                 count = min(count, self.plugin_config.max_batch_count)
             
-            logger.info(f"📸 [LLM] 发起 {count} 张自拍抽卡，核心动作: {action}")
+            logger.info(f"📸 [LLM] 发起 {count} 张自拍抽卡，核心动作: {action}。透传比例:{aspect_ratio} 尺寸:{size}")
             optimized_actions = await self.prompt_optimizer.optimize(action, count)
             
             persona_ref = self.plugin_config.persona_ref_image
@@ -472,6 +476,11 @@ class OmniDrawPlugin(Star):
                         extra_kwargs["user_refs"] = safe_refs
                         if not raw_refs:
                             extra_kwargs.pop("persona_ref", None)
+                            
+                    # 🚀 LLM 指定的高级参数注入
+                    if aspect_ratio: extra_kwargs["aspect_ratio"] = aspect_ratio
+                    if size: extra_kwargs["size"] = size
+                            
                     chain_manager = ChainManager(self.plugin_config, session)
                     tasks.append(chain_manager.run_chain(chain_to_use, final_prompt, **extra_kwargs))
                 
@@ -492,13 +501,16 @@ class OmniDrawPlugin(Star):
             return f"系统提示：画图失败 ({str(e)})。"
 
     @llm_tool(name="generate_image")
-    async def tool_generate_image(self, event: AstrMessageEvent, prompt: str, count: int = 1) -> str:
+    async def tool_generate_image(self, event: AstrMessageEvent, prompt: str, count: int = 1, aspect_ratio: str = "", size: str = "", extra_params: str = "") -> str:
         """
         AI 画图工具。当用户提出明确的画面要求你画出来时调用此工具。
         # ⚠️ AI 开发助手注意：绝对不可删除下方的 Args 注释，框架强依赖此信息向大模型注册参数表！
         Args:
             prompt (string): 扩写成英文的高质量动作与场景提示词。
             count (int): 需要生成的图片数量。默认为1。如果用户明确要求多张(如“来5张”)，请传入对应数字。
+            aspect_ratio (string): 宽高比例，主要用于 Gemini / gptimage2 / Midjourney。如 "16:9", "1:1", "9:16"。除非用户要求横竖屏，否则留空。
+            size (string): 分辨率，主要用于 DALL-E 系列。如 "1024x1024", "1024x1792"。除非用户要求尺寸，否则留空。
+            extra_params (string): 用户要求指定的风格(--style)或其他参数。以 "--key value" 格式拼合。
         """
         if not self._has_permission(event): return "系统提示：无权限调用。"
 
@@ -507,12 +519,19 @@ class OmniDrawPlugin(Star):
             if self.plugin_config.max_batch_count > 0:
                 count = min(count, self.plugin_config.max_batch_count)
                 
-            logger.info(f"🎨 [LLM] 发起 {count} 张绘画并发，动作: {prompt}")
+            logger.info(f"🎨 [LLM] 发起 {count} 张绘画并发。透传比例:{aspect_ratio} 尺寸:{size} 额外:{extra_params}")
 
             optimized_actions = await self.prompt_optimizer.optimize(prompt, count)
             raw_refs = self._get_event_images(event)
             safe_refs = await self._process_and_save_images(raw_refs)
             kwargs = {"user_refs": safe_refs} if safe_refs else {}
+            
+            # 🚀 LLM 指定的高级参数注入
+            if aspect_ratio: kwargs["aspect_ratio"] = aspect_ratio
+            if size: kwargs["size"] = size
+            if extra_params:
+                _, extra_kwargs = self.cmd_parser.parse(extra_params)
+                kwargs.update(extra_kwargs)
 
             tasks = []
             async with aiohttp.ClientSession() as session:
