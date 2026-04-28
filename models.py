@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1 - 数据模型
-极度强壮版：全基础语法解析，彻底杜绝 invalid syntax 报错！
+采用极简安全循环，完美兼容全新的中文 UI 标签与历史遗留英文标签。
 """
 import os
 from dataclasses import dataclass, field
@@ -33,55 +33,52 @@ class PluginConfig:
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any], data_dir: str) -> "PluginConfig":
-        # 1. 安全解析生图节点
         providers = []
         for p in config_dict.get("providers", []):
-            model_raw = str(p.get("model", ""))
+            model_raw = str(p.get("模型名称", p.get("model", "")))
             available_models = []
             for m in model_raw.replace("，", ",").split(","):
                 if m.strip():
                     available_models.append(m.strip())
                     
             api_keys = []
-            for k in str(p.get("api_keys", "")).split("\n"):
+            for k in str(p.get("API密钥", p.get("api_keys", ""))).split("\n"):
                 if k.strip():
                     api_keys.append(k.strip())
                     
             providers.append(ProviderConfig(
-                id=str(p.get("id", "node_1")),
-                api_type=str(p.get("api_type", "openai_image")),
-                base_url=str(p.get("base_url", "https://api.openai.com/v1")),
+                id=str(p.get("节点ID", p.get("id", "node_1"))),
+                api_type=str(p.get("接口模式", p.get("api_type", "openai_image"))),
+                base_url=str(p.get("接口地址 (需含/v1)", p.get("base_url", "https://api.openai.com/v1"))),
                 api_keys=api_keys,
                 model=available_models[0] if available_models else "",
-                timeout=float(p.get("timeout", 60.0)),
+                timeout=float(p.get("超时时间(秒)", p.get("timeout", 60.0))),
                 available_models=available_models
             ))
             
-        # 2. 安全解析视频节点
         video_providers = []
         for p in config_dict.get("video_providers", []):
-            model_raw = str(p.get("model", ""))
+            model_raw = str(p.get("模型名称", p.get("model", "")))
             available_models = []
             for m in model_raw.replace("，", ",").split(","):
                 if m.strip():
                     available_models.append(m.strip())
                     
             api_keys = []
-            for k in str(p.get("api_keys", "")).split("\n"):
+            for k in str(p.get("API密钥", p.get("api_keys", ""))).split("\n"):
                 if k.strip():
                     api_keys.append(k.strip())
                     
             video_providers.append(ProviderConfig(
-                id=str(p.get("id", "video_node_1")),
-                api_type=str(p.get("api_type", "async_task")),
-                base_url=str(p.get("base_url", "https://api.example.com/v1")),
+                id=str(p.get("节点ID", p.get("id", "video_node_1"))),
+                api_type=str(p.get("接口模式", p.get("api_type", "async_task"))),
+                base_url=str(p.get("接口地址 (需含/v1)", p.get("base_url", "https://api.example.com/v1"))),
                 api_keys=api_keys,
                 model=available_models[0] if available_models else "",
-                timeout=float(p.get("timeout", 300.0)),
+                timeout=float(p.get("超时时间(秒)", p.get("timeout", 300.0))),
                 available_models=available_models
             ))
 
-        # 3. 安全解析预设
         presets_dict = {}
         for p in config_dict.get("presets", []):
             if isinstance(p, str):
@@ -96,7 +93,6 @@ class PluginConfig:
                                 cmd = cmd[1:]
                             presets_dict[cmd] = prompt
 
-        # 4. 安全解析基础配置
         persona_conf = config_dict.get("persona_config", {})
         opt_conf = config_dict.get("optimizer_config", {})
         router_conf = config_dict.get("router_config", {})
@@ -119,7 +115,6 @@ class PluginConfig:
             else:
                 ref_path = os.path.abspath(os.path.join(data_dir, ref_path))
             
-        # 5. 安全解析路由
         chains = {"text2img": [], "selfie": [], "video": [], "optimizer": []}
         for item in str(router_conf.get("chain_text2img", "node_1")).split(","):
             if item.strip(): chains["text2img"].append(item.strip())
@@ -130,7 +125,6 @@ class PluginConfig:
         for item in str(opt_conf.get("chain_optimizer", "node_1")).split(","):
             if item.strip(): chains["optimizer"].append(item.strip())
 
-        # 6. 安全解析权限
         raw_users = perm_conf.get("allowed_users", "")
         allowed_users = []
         if raw_users:
