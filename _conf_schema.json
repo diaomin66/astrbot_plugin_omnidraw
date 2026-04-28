@@ -97,13 +97,13 @@
         "接口模式": { 
             "type": "string", 
             "options": [
-                "async_task (异步排队轮询 - 推荐Kling/Runway/Luma)", 
-                "openai_sync (同步阻塞直返 - 适合Sora等官方接口)", 
-                "openai_chat (对话伪装视频 - 适合各大中转API)"
+                "async_task (异步排队轮询/videos/generations)", 
+                "openai_sync (同步阻塞直返)", 
+                "openai_chat (对话伪装视频/chat/completions)"
             ], 
-            "default": "async_task (异步排队轮询 - 推荐Kling/Runway/Luma)"
+            "default": "async_task (异步排队轮询/videos/generations)"
         },
-        "接口地址 (需含/v1)": { "type": "string", "default": "https://api.example.com/v1" },
+        "接口地址 (需含/v1或/v2)": { "type": "string", "default": "https://api.example.com/v1" },
         "API密钥": { "type": "text", "default": "" },
         "模型名称": { "type": "string", "default": "kling-v1" },
         "超时时间(秒)": { "type": "string", "default": "600" }
@@ -117,13 +117,13 @@
           "接口模式": { 
               "type": "string", 
               "options": [
-                  "async_task (异步排队轮询 - 推荐Kling/Runway/Luma)", 
-                  "openai_sync (同步阻塞直返 - 适合Sora等官方接口)", 
-                  "openai_chat (对话伪装视频 - 适合各大中转API)"
+                  "async_task (异步排队轮询/videos/generations)", 
+                  "openai_sync (同步阻塞直返)", 
+                  "openai_chat (对话伪装视频/chat/completions)"
               ], 
-              "default": "async_task (异步排队轮询 - 推荐Kling/Runway/Luma)" 
+              "default": "async_task (异步排队轮询/videos/generations)" 
           },
-          "接口地址 (需含/v1)": { "type": "string", "default": "https://api.example.com/v1" },
+          "接口地址 (需含/v1或/v2)": { "type": "string", "default": "https://api.example.com/v1" },
           "API密钥": { "type": "text", "default": "sk-xxxxxx" },
           "模型名称": { "type": "string", "default": "kling-v1" },
           "超时时间(秒)": { "type": "string", "default": "600" }
