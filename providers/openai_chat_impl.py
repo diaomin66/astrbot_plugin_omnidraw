@@ -1,6 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1 - OpenAI Chat 兼容实现
-功能：严格遵循 Chat/Vision 协议，通过单 User 节点与前置图片确保参考图送达
+功能：支持高阶多模态参数动态透传 (兼容 Midjourney/Gemini 等走 Chat 通道的代理节点)
 """
 import aiohttp
 import re
@@ -47,7 +47,6 @@ class OpenAIChatProvider(BaseProvider):
         user_content = []
 
         # 1. ⚠️ 关键修正：图片必须在文字之前！
-        # 绝大多数大模型是顺序读取 Token 的，必须让它先“看”到图，再“听”你的要求
         image_count = 0
         for ref_image in target_refs:
             b64_image = await self._encode_image_to_base64(ref_image)
@@ -65,7 +64,6 @@ class OpenAIChatProvider(BaseProvider):
             logger.info(f"✅ [Chat/Vision通道] 成功将 {image_count} 张参考图封装为视觉信号 (Image First)")
 
         # 2. 注入提示词
-        # ⚠️ 关键修正：抛弃 System 角色，将系统指令合并到 User 里，确保多模态网关不拦截
         full_prompt = (
             "You are a professional image generation assistant. "
             "Based on the prompt and the reference image or images provided above, generate the corresponding image. "
@@ -89,6 +87,14 @@ class OpenAIChatProvider(BaseProvider):
                 }
             ]
         }
+
+        # 🚀 将高级透传参数暴力注入到 Chat 协议的顶级结构中
+        internal_keys = {"user_refs", "user_ref", "persona_refs", "persona_ref"}
+        api_kwargs = {k: v for k, v in kwargs.items() if k not in internal_keys}
+        
+        if api_kwargs:
+            payload.update(api_kwargs)
+            logger.info(f"📤 [Chat/Vision通道] 触发高级参数透传:\n{json.dumps(api_kwargs, ensure_ascii=False)}")
 
         headers = {
             "Content-Type": "application/json",
