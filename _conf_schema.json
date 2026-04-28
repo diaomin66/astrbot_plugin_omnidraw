@@ -63,24 +63,24 @@
     "items": {
       "type": "object",
       "keys": {
-        "id": { "description": "节点ID", "type": "string", "default": "node_1" },
-        "api_type": { "description": "接口模式", "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
-        "base_url": { "description": "接口地址", "type": "string", "default": "https://api.openai.com/v1" },
-        "api_keys": { "description": "密钥池 (一行一个)", "type": "text", "default": "" },
-        "model": { "description": "模型名称 (多个用逗号隔开)", "type": "string", "default": "banana" },
-        "timeout": { "description": "超时时间 (秒)", "type": "string", "default": "60" }
+        "节点ID": { "type": "string", "default": "node_1" },
+        "接口模式": { "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
+        "接口地址 (需含/v1)": { "type": "string", "default": "https://api.openai.com/v1" },
+        "API密钥": { "type": "text", "default": "" },
+        "模型名称": { "type": "string", "default": "banana" },
+        "超时时间(秒)": { "type": "string", "default": "60" }
       }
     },
     "templates": {
       "openai_node": {
         "name": "➕ 添加生图节点",
         "items": {
-          "id": { "type": "string", "default": "node_1" },
-          "api_type": { "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
-          "base_url": { "type": "string", "default": "https://api.openai.com/v1" },
-          "api_keys": { "type": "text", "default": "sk-xxxxxx" },
-          "model": { "type": "string", "default": "banana" },
-          "timeout": { "type": "string", "default": "60" }
+          "节点ID": { "type": "string", "default": "node_1" },
+          "接口模式": { "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
+          "接口地址 (需含/v1)": { "type": "string", "default": "https://api.openai.com/v1" },
+          "API密钥": { "type": "text", "default": "sk-xxxxxx" },
+          "模型名称": { "type": "string", "default": "banana" },
+          "超时时间(秒)": { "type": "string", "default": "60" }
         }
       }
     },
@@ -93,9 +93,8 @@
     "items": {
       "type": "object",
       "keys": {
-        "id": { "description": "节点ID", "type": "string", "default": "video_node_1" },
-        "api_type": { 
-            "description": "接口模式", 
+        "节点ID": { "type": "string", "default": "video_node_1" },
+        "接口模式": { 
             "type": "string", 
             "options": [
                 "async_task (异步排队轮询 - 推荐Kling/Runway/Luma)", 
@@ -104,18 +103,18 @@
             ], 
             "default": "async_task (异步排队轮询 - 推荐Kling/Runway/Luma)"
         },
-        "base_url": { "description": "接口地址", "type": "string", "default": "https://api.example.com/v1" },
-        "api_keys": { "description": "密钥池 (一行一个)", "type": "text", "default": "" },
-        "model": { "description": "视频模型", "type": "string", "default": "kling-v1" },
-        "timeout": { "description": "最大轮询时间(秒)", "type": "string", "default": "600" }
+        "接口地址 (需含/v1)": { "type": "string", "default": "https://api.example.com/v1" },
+        "API密钥": { "type": "text", "default": "" },
+        "模型名称": { "type": "string", "default": "kling-v1" },
+        "超时时间(秒)": { "type": "string", "default": "600" }
       }
     },
     "templates": {
       "video_node": {
         "name": "➕ 添加视频节点",
         "items": {
-          "id": { "type": "string", "default": "video_node_1" },
-          "api_type": { 
+          "节点ID": { "type": "string", "default": "video_node_1" },
+          "接口模式": { 
               "type": "string", 
               "options": [
                   "async_task (异步排队轮询 - 推荐Kling/Runway/Luma)", 
@@ -124,10 +123,10 @@
               ], 
               "default": "async_task (异步排队轮询 - 推荐Kling/Runway/Luma)" 
           },
-          "base_url": { "type": "string", "default": "https://api.example.com/v1" },
-          "api_keys": { "type": "text", "default": "sk-xxxxxx" },
-          "model": { "type": "string", "default": "kling-v1" },
-          "timeout": { "type": "string", "default": "600" }
+          "接口地址 (需含/v1)": { "type": "string", "default": "https://api.example.com/v1" },
+          "API密钥": { "type": "text", "default": "sk-xxxxxx" },
+          "模型名称": { "type": "string", "default": "kling-v1" },
+          "超时时间(秒)": { "type": "string", "default": "600" }
         }
       }
     },
