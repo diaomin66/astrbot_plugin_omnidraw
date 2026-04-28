@@ -1,5 +1,6 @@
 """
 AstrBot 万象画卷插件 v3.1 - 数据模型
+支持全中文 UI 变量映射与向后兼容。
 """
 import os
 from dataclasses import dataclass, field
@@ -20,7 +21,7 @@ class PluginConfig:
     providers: List[ProviderConfig]
     video_providers: List[ProviderConfig]
     chains: Dict[str, List[str]]
-    presets: Dict[str, str]       # 预设字典
+    presets: Dict[str, str]       
     enable_optimizer: bool        
     optimizer_model: str  
     optimizer_timeout: float  
@@ -34,39 +35,38 @@ class PluginConfig:
     def from_dict(cls, config_dict: Dict[str, Any], data_dir: str) -> "PluginConfig":
         providers = []
         for p in config_dict.get("providers", []):
-            model_raw = str(p.get("model", ""))
+            model_raw = str(p.get("模型名称", p.get("model", "")))
             available_models = [m.strip() for m in model_raw.replace("，", ",").split(",") if m.strip()]
             providers.append(ProviderConfig(
-                id=p.get("id", ""),
-                api_type=p.get("api_type", "openai_image"),
-                base_url=p.get("base_url", ""),
-                api_keys=[k.strip() for k in p.get("api_keys", "").split("\n") if k.strip()],
+                id=str(p.get("节点ID", p.get("id", ""))),
+                api_type=str(p.get("接口模式", p.get("api_type", "openai_image"))),
+                base_url=str(p.get("接口地址", p.get("base_url", ""))),
+                api_keys=[k.strip() for k in str(p.get("API密钥", p.get("api_keys", ""))).split("\n") if k.strip()],
                 model=available_models[0] if available_models else "",
-                timeout=float(p.get("timeout", 60.0)),
+                timeout=float(p.get("超时时间", p.get("timeout", 60.0))),
                 available_models=available_models
             ))
             
         video_providers = []
         for p in config_dict.get("video_providers", []):
-            model_raw = str(p.get("model", ""))
+            model_raw = str(p.get("模型名称", p.get("model", "")))
             available_models = [m.strip() for m in model_raw.replace("，", ",").split(",") if m.strip()]
             video_providers.append(ProviderConfig(
-                id=p.get("id", ""),
-                api_type=p.get("api_type", "openai_video"),
-                base_url=p.get("base_url", ""),
-                api_keys=[k.strip() for k in p.get("api_keys", "").split("\n") if k.strip()],
+                id=str(p.get("节点ID", p.get("id", ""))),
+                api_type=str(p.get("接口模式", p.get("api_type", "async_task"))),
+                base_url=str(p.get("接口地址", p.get("base_url", ""))),
+                api_keys=[k.strip() for k in str(p.get("API密钥", p.get("api_keys", ""))).split("\n") if k.strip()],
                 model=available_models[0] if available_models else "",
-                timeout=float(p.get("timeout", 300.0)),
+                timeout=float(p.get("超时时间", p.get("timeout", 300.0))),
                 available_models=available_models
             ))
 
-        # 🚀 解析单行预设库 (支持中文冒号或英文冒号分割)
         presets_dict = {}
         for p in config_dict.get("presets", []):
             if isinstance(p, str):
                 separator = "：" if "：" in p else ":"
                 if separator in p:
-                    parts = p.split(separator, 1) # 只切分第一个冒号
+                    parts = p.split(separator, 1)
                     if len(parts) == 2:
                         cmd = parts[0].strip()
                         prompt = parts[1].strip()
@@ -91,26 +91,26 @@ class PluginConfig:
             ref_path = target_path if os.path.exists(target_path) else os.path.abspath(os.path.join(data_dir, ref_path))
             
         chains = {
-            "text2img": [p.strip() for p in router_conf.get("chain_text2img", "node_1").split(",") if p.strip()],
-            "selfie": [p.strip() for p in router_conf.get("chain_selfie", "node_1").split(",") if p.strip()],
-            "video": [p.strip() for p in router_conf.get("chain_video", "video_node_1").split(",") if p.strip()],
-            "optimizer": [p.strip() for p in opt_conf.get("chain_optimizer", "node_1").split(",") if p.strip()] 
+            "text2img": [p.strip() for p in str(router_conf.get("chain_text2img", "node_1")).split(",") if p.strip()],
+            "selfie": [p.strip() for p in str(router_conf.get("chain_selfie", "node_1")).split(",") if p.strip()],
+            "video": [p.strip() for p in str(router_conf.get("chain_video", "video_node_1")).split(",") if p.strip()],
+            "optimizer": [p.strip() for p in str(opt_conf.get("chain_optimizer", "node_1")).split(",") if p.strip()] 
         }
 
         raw_users = perm_conf.get("allowed_users", "")
-        allowed_users = [u.strip() for u in raw_users.replace("，", ",").split(",") if u.strip()] if isinstance(raw_users, str) else []
+        allowed_users = [u.strip() for u in str(raw_users).replace("，", ",").split(",") if u.strip()] if raw_users else []
 
         return cls(
             providers=providers,
             video_providers=video_providers,
             chains=chains,
             presets=presets_dict,
-            enable_optimizer=opt_conf.get("enable_optimizer", True),
-            optimizer_model=opt_conf.get("optimizer_model", "gpt-4o-mini"),
+            enable_optimizer=bool(opt_conf.get("enable_optimizer", True)),
+            optimizer_model=str(opt_conf.get("optimizer_model", "gpt-4o-mini")),
             optimizer_timeout=float(opt_conf.get("optimizer_timeout", 15.0)),
             max_batch_count=int(opt_conf.get("max_batch_count", 0)),
-            persona_name=persona_conf.get("persona_name", "默认助理"),
-            persona_base_prompt=persona_conf.get("persona_base_prompt", ""),
+            persona_name=str(persona_conf.get("persona_name", "默认助理")),
+            persona_base_prompt=str(persona_conf.get("persona_base_prompt", "")),
             persona_ref_image=ref_path,
             allowed_users=allowed_users
         )
