@@ -63,24 +63,24 @@
     "items": {
       "type": "object",
       "keys": {
-        "id": { "description": "节点ID", "type": "string", "default": "node_1" },
-        "api_type": { "description": "接口模式", "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
-        "base_url": { "description": "接口地址", "type": "string", "default": "https://api.openai.com/v1" },
-        "api_keys": { "description": "密钥池 (一行一个)", "type": "text", "default": "" },
-        "model": { "description": "模型名称 (多个用逗号隔开)", "type": "string", "default": "banana" },
-        "timeout": { "description": "超时时间 (秒)", "type": "string", "default": "60" }
+        "节点ID": { "type": "string", "default": "node_1" },
+        "接口模式": { "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
+        "接口地址": { "type": "string", "default": "https://api.openai.com/v1" },
+        "API密钥": { "type": "text", "default": "" },
+        "模型名称": { "type": "string", "default": "banana" },
+        "超时时间": { "type": "string", "default": "60" }
       }
     },
     "templates": {
       "openai_node": {
         "name": "➕ 添加生图节点",
         "items": {
-          "id": { "type": "string", "default": "node_1" },
-          "api_type": { "type": "string", "options": ["openai_image", "openai_chat"], "default": "openai_image" },
-          "base_url": { "type": "string", "default": "https://api.openai.com/v1" },
-          "api_keys": { "type": "text", "default": "sk-xxxxxx" },
-          "model": { "type": "string", "default": "banana" },
-          "timeout": { "type": "string", "default": "60" }
+          "节点ID": "node_1",
+          "接口模式": "openai_image",
+          "接口地址": "https://api.openai.com/v1",
+          "API密钥": "sk-xxxxxx",
+          "模型名称": "banana",
+          "超时时间": "60"
         }
       }
     },
@@ -93,32 +93,32 @@
     "items": {
       "type": "object",
       "keys": {
-        "id": { "description": "节点ID", "type": "string", "default": "video_node_1" },
-        "api_type": { 
+        "节点ID": { "type": "string", "default": "video_node_1" },
+        "接口模式": { 
             "type": "string", 
             "options": [
-                "async_task (异步排队轮询 - 推荐Kling/Luma/Runway)", 
-                "openai_sync (同步阻塞直返 - 适合Sora等官方接口)", 
-                "openai_chat (对话伪装视频 - 适合各路中转API)"
+                "async_task_异步排队轮询(推荐Kling/Luma)", 
+                "openai_sync_同步阻塞直返(适合Sora)", 
+                "openai_chat_对话伪装视频(适合中转)"
             ], 
-            "default": "async_task (异步排队轮询 - 推荐Kling/Luma/Runway)"
+            "default": "async_task_异步排队轮询(推荐Kling/Luma)"
         },
-        "base_url": { "description": "接口地址 (需包含版本号如 /v1 或 /v2)", "type": "string", "default": "https://api.example.com/v1" },
-        "api_keys": { "description": "密钥池 (一行一个)", "type": "text", "default": "" },
-        "model": { "description": "视频模型名称 (多个逗号隔开)", "type": "string", "default": "kling-v1" },
-        "timeout": { "description": "超时或最大轮询时间(秒)", "type": "string", "default": "600" }
+        "接口地址": { "type": "string", "default": "https://api.example.com/v1" },
+        "API密钥": { "type": "text", "default": "" },
+        "模型名称": { "type": "string", "default": "kling-v1" },
+        "超时时间": { "type": "string", "default": "600" }
       }
     },
     "templates": {
       "video_node": {
         "name": "➕ 添加视频节点",
         "items": {
-          "id": { "type": "string", "default": "video_node_1" },
-          "api_type": { "type": "string", "default": "async_task (异步排队轮询 - 推荐Kling/Luma/Runway)" },
-          "base_url": { "type": "string", "default": "https://api.example.com/v1" },
-          "api_keys": { "type": "text", "default": "sk-xxxxxx" },
-          "model": { "type": "string", "default": "kling-v1" },
-          "timeout": { "type": "string", "default": "600" }
+          "节点ID": "video_node_1",
+          "接口模式": "async_task_异步排队轮询(推荐Kling/Luma)",
+          "接口地址": "https://api.example.com/v1",
+          "API密钥": "sk-xxxxxx",
+          "模型名称": "kling-v1",
+          "超时时间": "600"
         }
       }
     },
