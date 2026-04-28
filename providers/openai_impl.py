@@ -1,13 +1,8 @@
-"""
-AstrBot 万象画卷插件 v3.1 - OpenAI 标准实现
-功能：保留防盗链本地拦截 + 最终提示词日志打印，纯净相对导入
-"""
 import aiohttp
 import json
 from typing import Any
 from astrbot.api import logger
 
-# 🚀 纯净的相对导入
 from .base import BaseProvider
 
 class OpenAIProvider(BaseProvider):
@@ -36,10 +31,11 @@ class OpenAIProvider(BaseProvider):
         base_url = self.config.base_url.rstrip("/")
         ref_images = self.get_reference_images(**kwargs)
 
-        # ==========================================
-        # 📝 核心：打印最终发送给 API 的原味提示词
-        # ==========================================
-        logger.info(f"📝 [标准通道] 最终发送给 API 的提示词:\n{prompt}")
+        logger.info(f"📝 [标准通道] 最终发送给 API 的核心提示词:\n{prompt}")
+
+        # 🚀 剥离内置参数，剩下的全是用户或 LLM 透传的高级参数
+        internal_keys = {"user_refs", "user_ref", "persona_refs", "persona_ref"}
+        api_kwargs = {k: v for k, v in kwargs.items() if k not in internal_keys}
 
         if ref_images:
             url = base_url + "/images/edits"
@@ -57,15 +53,31 @@ class OpenAIProvider(BaseProvider):
             data.add_field('model', self.config.model)
             data.add_field('n', '1')
             
+            # 高级参数注入表单
+            for k, v in api_kwargs.items():
+                data.add_field(k, str(v))
+            
             headers = {"Authorization": "Bearer " + current_key}
             timeout_obj = aiohttp.ClientTimeout(total=self.config.timeout)
             async with self.session.post(url, data=data, headers=headers, timeout=timeout_obj) as response:
                 return await self._parse_response(response, base_url)
                 
         else:
-            # 🎨 文生图模式 (Text-to-Image / Generations)
             url = base_url + "/images/generations"
-            payload = {"model": self.config.model, "prompt": prompt, "n": 1}
+            
+            # 基础 Payload
+            payload = {
+                "model": self.config.model, 
+                "prompt": prompt, 
+                "n": 1
+            }
+            
+            # 🚀 完美兼容 gptimage2 / gemini-3.1-image 规范
+            # 暴力将所有高级参数塞入 JSON 的最外层，中转 API 会直接识别并调用底层
+            payload.update(api_kwargs)
+            
+            logger.info(f"📤 [标准通道] 附带高级参数的请求体:\n{json.dumps(payload, ensure_ascii=False)}")
+            
             headers = {"Content-Type": "application/json", "Authorization": "Bearer " + current_key}
             
             timeout_obj = aiohttp.ClientTimeout(total=self.config.timeout)
