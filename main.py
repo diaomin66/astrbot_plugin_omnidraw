@@ -1,6 +1,7 @@
 """
 AstrBot 万象画卷插件 v3.1
-功能：支持 Gemini / gptimage2 高阶参数动态透传（指令与LLM全覆盖）
+功能：支持 Gemini / gptimage2 高阶参数动态透传。
+优化：极简用户交互，移除冗长的生图参数汇报，保持群聊清爽。
 """
 import os
 import base64
@@ -9,7 +10,6 @@ import time
 import aiohttp
 import asyncio
 import re
-import json
 from typing import AsyncGenerator, Any
 
 try:
@@ -314,7 +314,8 @@ class OmniDrawPlugin(Star):
         preset_prompt = self.plugin_config.presets[cmd_name]
         safe_refs = await self._process_and_save_images(raw_refs)
         
-        yield event.plain_result(f"✨ 正在绘制……")
+        # ✨ 预设简化为一句话
+        yield event.plain_result(f"{MessageEmoji.PAINTING} 收到灵感，正在绘制...")
         
         try:
             async with aiohttp.ClientSession() as session:
@@ -327,7 +328,7 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(f"💥 绘制失败: {e}")
 
     # ==========================================
-    # 常规指令区 
+    # 常规指令区 (精简文案版)
     # ==========================================
     @filter.command("画")
     @handle_errors
@@ -344,21 +345,13 @@ class OmniDrawPlugin(Star):
             return
             
         safe_refs = await self._process_and_save_images(raw_refs)
-        
-        # 🚀 强大的正则解析提取参数
         prompt, kwargs = self.cmd_parser.parse(message)
         
-        actual_ref_count = 0
         if safe_refs:
             kwargs["user_refs"] = safe_refs
-            actual_ref_count = len(safe_refs)
             
-        yield event.plain_result(
-            f"{MessageEmoji.PAINTING} 收到灵感，正在绘制...\n"
-            f"📝 最终提示词：{prompt}\n"
-            f"⚙️ 附加参数：{len(kwargs) - (1 if safe_refs else 0)} 个\n"
-            f"🖼️ 实际参考图：{actual_ref_count} 张"
-        )
+        # 🚀 极致精简：不再输出长串的参数和提示词，只保留提示音
+        yield event.plain_result(f"{MessageEmoji.PAINTING} 收到灵感，正在绘制...")
         
         async with aiohttp.ClientSession() as session:
             chain_manager = ChainManager(self.plugin_config, session)
@@ -382,8 +375,6 @@ class OmniDrawPlugin(Star):
         optimized_action = opt_actions[0] if opt_actions else user_input
         
         final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(optimized_action)
-        
-        # 将用户透传的 kwargs 并入
         extra_kwargs.update(kwargs)
         
         persona_ref = extra_kwargs.get("persona_ref", "")
@@ -391,20 +382,15 @@ class OmniDrawPlugin(Star):
         target_refs = raw_refs if raw_refs else ([persona_ref] if persona_ref else [])
         
         safe_refs = await self._process_and_save_images(target_refs)
-        actual_ref_count = 0
         if safe_refs:
             extra_kwargs["user_refs"] = safe_refs
-            actual_ref_count = len(safe_refs) + (1 if raw_refs and persona_ref else 0)
             if not raw_refs:
                 extra_kwargs.pop("persona_ref", None)
         else:
             extra_kwargs.pop("user_refs", None)
             
-        yield event.plain_result(
-            f"{MessageEmoji.INFO} 正在为「{self.plugin_config.persona_name}」生成自拍...\n"
-            f"✨ 副脑已重构提示词\n"
-            f"🖼️ 实际参考图：{actual_ref_count} 张"
-        )
+        # 🚀 极致精简自拍提示文案
+        yield event.plain_result(f"{MessageEmoji.INFO} 正在为「{self.plugin_config.persona_name}」生成自拍，请稍候...")
         
         chain_to_use = "selfie" if "selfie" in self.plugin_config.chains else "text2img"
         async with aiohttp.ClientSession() as session:
@@ -430,12 +416,9 @@ class OmniDrawPlugin(Star):
         prompt, _ = self.cmd_parser.parse(message)
         safe_refs = await self._process_and_save_images(raw_refs)
         
-        yield event.plain_result(
-            f"{MessageEmoji.INFO} 视频任务已提交后台！\n"
-            f"📝 最终提示词：{prompt}\n"
-            f"🖼️ 实际参考图：{len(safe_refs)} 张\n"
-            f"⏳ 正在渲染，请稍候..."
-        )
+        # 🚀 极致精简视频提示文案
+        yield event.plain_result(f"{MessageEmoji.INFO} 视频任务已提交后台！正在渲染，请稍候...")
+        
         asyncio.create_task(self.video_manager.background_task_runner(event, prompt, safe_refs))
 
     # ==========================================
@@ -478,7 +461,6 @@ class OmniDrawPlugin(Star):
                         if not raw_refs:
                             extra_kwargs.pop("persona_ref", None)
                             
-                    # 🚀 LLM 指定的高级参数注入
                     if aspect_ratio: extra_kwargs["aspect_ratio"] = aspect_ratio
                     if size: extra_kwargs["size"] = size
                             
@@ -527,7 +509,6 @@ class OmniDrawPlugin(Star):
             safe_refs = await self._process_and_save_images(raw_refs)
             kwargs = {"user_refs": safe_refs} if safe_refs else {}
             
-            # 🚀 LLM 指定的高级参数注入
             if aspect_ratio: kwargs["aspect_ratio"] = aspect_ratio
             if size: kwargs["size"] = size
             if extra_params:
@@ -537,9 +518,6 @@ class OmniDrawPlugin(Star):
             tasks = []
             async with aiohttp.ClientSession() as session:
                 for opt_action in optimized_actions:
-                    if opt_action.strip().startswith("{") and "HARDCODED_ANTI_COLLAGE_RULE" in opt_action:
-                        opt_action = PromptOptimizer.flatten_json_prompt(opt_action)
-                        logger.info(f"🔄 [Optimizer] JSON 提示词已转换为自然语言格式")
                     chain_manager = ChainManager(self.plugin_config, session)
                     tasks.append(chain_manager.run_chain("text2img", opt_action, **kwargs))
                 
