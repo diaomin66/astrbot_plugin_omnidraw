@@ -5,6 +5,7 @@ import os
 from typing import Tuple, Dict, Any
 from astrbot.api import logger
 from ..models import PluginConfig
+from ..core.prompt_optimizer import PromptOptimizer
 
 class PersonaManager:
     def __init__(self, config: PluginConfig):
@@ -12,6 +13,11 @@ class PersonaManager:
 
     def build_persona_prompt(self, user_input_action: str) -> Tuple[str, Dict[str, Any]]:
         action_prompt_part = user_input_action.strip() or "looking at camera and smiling"
+        
+        if action_prompt_part.startswith("{") and "HARDCODED_ANTI_COLLAGE_RULE" in action_prompt_part:
+            action_prompt_part = PromptOptimizer.flatten_json_prompt(action_prompt_part)
+            logger.info(f"🔄 [Persona] JSON 提示词已转换为自然语言格式")
+
         persona_base_part = self.config.persona_base_prompt.strip()
         
         if persona_base_part:

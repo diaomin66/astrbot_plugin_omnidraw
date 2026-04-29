@@ -13,6 +13,79 @@ class PromptOptimizer:
     def __init__(self, config: PluginConfig):
         self.config = config
 
+    @staticmethod
+    def flatten_json_prompt(json_str: str) -> str:
+        try:
+            data = json.loads(json_str)
+            if not isinstance(data, dict):
+                return json_str
+        except (json.JSONDecodeError, TypeError):
+            return json_str
+
+        parts = []
+
+        if "subject" in data:
+            subject = data["subject"]
+            if isinstance(subject, dict):
+                for key in ["appearance", "body_type", "accessories"]:
+                    val = subject.get(key, "")
+                    if val and val != "none": parts.append(val)
+
+        if "clothing" in data:
+            clothing = data["clothing"]
+            if isinstance(clothing, dict):
+                for key in ["top", "bottom", "shoes"]:
+                    val = clothing.get(key, "")
+                    if val and val != "none": parts.append(val)
+
+        if "pose_and_action" in data:
+            pose_data = data["pose_and_action"]
+            if isinstance(pose_data, dict):
+                for key in ["pose", "action", "gaze"]:
+                    val = pose_data.get(key, "")
+                    if val: parts.append(val)
+
+        if "environment" in data:
+            env = data["environment"]
+            if isinstance(env, dict):
+                for key in ["scene", "furniture", "decor", "items"]:
+                    val = env.get(key, "")
+                    if val: parts.append(val)
+
+        if "lighting" in data:
+            lighting = data["lighting"]
+            if isinstance(lighting, dict):
+                for key in ["type", "source", "quality"]:
+                    val = lighting.get(key, "")
+                    if val: parts.append(val)
+
+        if "styling_and_mood" in data:
+            style = data["styling_and_mood"]
+            if isinstance(style, dict):
+                aesthetic = style.get("aesthetic", "")
+                mood = style.get("mood", "")
+                if aesthetic: parts.append(aesthetic)
+                if mood: parts.append(mood)
+
+        if "technical_specs" in data:
+            specs = data["technical_specs"]
+            if isinstance(specs, dict):
+                for key in ["camera_simulation", "focal_length", "aperture"]:
+                    val = specs.get(key, "")
+                    if val: parts.append(val)
+                quality_tags = specs.get("quality_tags", [])
+                if isinstance(quality_tags, list):
+                    for tag in quality_tags:
+                        if tag: parts.append(tag)
+
+        anti_rule = data.get("HARDCODED_ANTI_COLLAGE_RULE", "")
+        if anti_rule:
+            parts.append(anti_rule)
+
+        if parts:
+            return ", ".join(parts)
+        return json_str
+
     async def optimize(self, raw_action: str, count: int = 1) -> list:
         if not getattr(self.config, "enable_optimizer", True):
             return [raw_action] * count
