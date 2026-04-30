@@ -171,6 +171,32 @@ class OmniDrawPlugin(Star):
             if self.plugin_config.providers: return self.plugin_config.providers[0]
         return None
 
+    def _get_command_message(self, event: AstrMessageEvent, command_name: str, fallback_parts: list[str]) -> str:
+        fallback_text = " ".join(str(x) for x in fallback_parts if x).strip()
+        text = str(getattr(event, "message_str", "") or "").strip()
+
+        if not text:
+            message_obj = getattr(event, "message_obj", None)
+            text = str(getattr(message_obj, "message_str", "") or "").strip()
+
+            if not text:
+                message_chain = getattr(message_obj, "message", []) if message_obj else []
+                plain_parts = []
+                for comp in message_chain:
+                    if isinstance(comp, Plain):
+                        plain_parts.append(comp.text)
+                text = "".join(plain_parts).strip()
+
+        if not text:
+            return fallback_text
+
+        prefix_pattern = rf'^[^\w\u4e00-\u9fa5]{{0,3}}{re.escape(command_name)}(?:\s+|$)'
+        match = re.match(prefix_pattern, text)
+        if match:
+            return text[match.end():].strip()
+
+        return fallback_text
+
     @filter.command("万象帮助")
     @handle_errors
     async def cmd_help(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
@@ -336,7 +362,8 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(f"{MessageEmoji.WARNING} 抱歉，暂无权限！")
             return
 
-        message = " ".join(str(x) for x in [p1,p2,p3,p4,p5,p6,p7,p8,p9,p10] if x).strip()
+        fallback_parts = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10]
+        message = self._get_command_message(event, "画", fallback_parts)
         raw_refs = self._get_event_images(event)
         
         if not message and not raw_refs:
@@ -373,7 +400,8 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(f"{MessageEmoji.WARNING} 抱歉，暂无权限！")
             return
 
-        message = " ".join(str(x) for x in [p1,p2,p3,p4,p5,p6,p7,p8,p9,p10] if x).strip()
+        fallback_parts = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10]
+        message = self._get_command_message(event, "自拍", fallback_parts)
         user_input, kwargs = self.cmd_parser.parse(message)
         if not user_input:
             user_input = "看着镜头微笑"
@@ -420,7 +448,8 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(f"{MessageEmoji.WARNING} 抱歉，暂无权限！")
             return
 
-        message = " ".join(str(x) for x in [p1,p2,p3,p4,p5,p6,p7,p8,p9,p10] if x).strip()
+        fallback_parts = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10]
+        message = self._get_command_message(event, "视频", fallback_parts)
         raw_refs = self._get_event_images(event)
         
         if not message and not raw_refs:
