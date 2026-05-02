@@ -114,36 +114,10 @@ Format:
                     if "choices" in data and len(data["choices"]) > 0:
                         raw_content = data["choices"][0]["message"]["content"].strip()
                         
-                        try:
-                            prompt_data = json.loads(raw_content)
-                            results = []
-                            
-                            items = []
-                            if count == 1:
-                                items = [prompt_data]
-                            else:
-                                items = prompt_data.get("results", [])
-                                if not items and isinstance(prompt_data, list):
-                                    items = prompt_data
-                                    
-                            for item in items:
-                                # 🚀【终极防拼图锁死】🚀
-                                item["HARDCODED_ANTI_COLLAGE_RULE"] = "1girl, solo, single image, one single frame, complete and unified scene, NO grid, NO collage, NO split screen, NO character sheet, NO multiple views, NO comic panels"
-                                
-                                json_str = json.dumps(item, ensure_ascii=False, indent=2)
-                                results.append(json_str)
-                            
-                            while len(results) < count:
-                                results.append(results[0] if results else raw_action)
-                                
-                            logger.info(f"✨ [副脑] 成功提取 {len(results[:count])} 组防拼图 JSON！")
-                            return results[:count]
-                            
-                        except Exception as e:
-                            logger.warning(f"⚠️ [副脑] 原生 JSON 解析提取失败: {e}")
-                            return [raw_action] * count
-            except Exception as e:
-                logger.warning(f"⚠️ [副脑降级] ({str(e)})")
-                return [raw_action] * count
-                
-        return [raw_action] * count
+                        # 🚀 核心修复：暴力清洗 Markdown 代码块外壳 (兼容 Gemini/Claude)
+                        raw_content = re.sub(r"^
+http://googleusercontent.com/immersive_entry_chip/0
+
+**改动总结：**
+1. **彻底解决了 `Expecting value` 报错**：在解析 JSON 之前，加入了强大的正则过滤 `re.sub(r"^
+http://googleusercontent.com/immersive_entry_chip/1
