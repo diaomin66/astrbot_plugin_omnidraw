@@ -40,6 +40,7 @@ class OpenAIProvider(BaseProvider):
         if ref_images:
             url = base_url + "/images/edits"
             logger.info(f"✅ 检测到 {len(ref_images)} 张参考图，正切换至标准改图通道: {url}")
+            logger.info(f"⚙️ [标准改图通道] 附加参数：{len(api_kwargs)} 个")
 
             data = aiohttp.FormData()
             for idx, ref_image in enumerate(ref_images, start=1):
