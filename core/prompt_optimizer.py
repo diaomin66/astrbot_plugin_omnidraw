@@ -64,7 +64,6 @@ OUTPUT FORMAT:
   ]
 }}"""
 
-        # 🚀 修复核心一：大幅提升 max_tokens，彻底防止生成一半被截断！
         payload = {
             "model": self.config.optimizer_model,
             "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": raw_action}],
@@ -104,8 +103,7 @@ OUTPUT FORMAT:
                                 if not items and isinstance(prompt_data, list):
                                     items = prompt_data
                         except Exception as e:
-                            # 🚀 修复核心二：无敌抢救模式 (The Indestructible Extractor)
-                            # 如果 JSON 因为少标点、截断等原因炸了，直接用字符串切片强行把内容挖出来！
+                            # 🚀 无敌抢救模式
                             logger.warning(f"⚠️ [副脑] 原生 JSON 解析失败, 启动无敌抢救模式... 错误: {e}")
                             fallback_item = {}
                             keys = ["subject_appearance", "clothing_and_accessories", "pose_and_action", "environment_and_scene", "lighting_and_mood", "technical_specs"]
@@ -154,144 +152,6 @@ OUTPUT FORMAT:
                         logger.info(f"✨ [副脑] 成功提取 {len(results[:count])} 组防拼图 JSON！")
                         return results[:count]
                         
-            except Exception as e:
-                logger.warning(f"⚠️ [副脑降级] ({str(e)})")
-                return [raw_action] * count
-                
-        return [raw_action] * count"""
-提示词副脑优化器 (Prompt Optimizer)
-功能：强制 LLM 输出 JSON 格式，并物理级写死“防拼图”特征，确保百分百单图输出。
-"""
-import json
-import re
-import aiohttp
-import asyncio
-from astrbot.api import logger
-from ..models import PluginConfig
-
-class PromptOptimizer:
-    def __init__(self, config: PluginConfig):
-        self.config = config
-
-    async def optimize(self, raw_action: str, count: int = 1) -> list:
-        if not getattr(self.config, "enable_optimizer", True):
-            return [raw_action] * count
-
-        if not raw_action or raw_action.strip() == "": return [raw_action] * count
-
-        chain = self.config.chains.get("optimizer", [])
-        provider = self.config.get_provider(chain[0]) if chain else (self.config.providers[0] if self.config.providers else None)
-        if not provider: return [raw_action] * count
-            
-        base_url = provider.base_url.rstrip("/")
-        endpoint = f"{base_url}/chat/completions" if base_url.endswith("/v1") else f"{base_url}/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {provider.api_keys[0]}", "Content-Type": "application/json"}
-
-        # 🚀 降维打击：将深度嵌套的 JSON 彻底扁平化！
-        # 大模型在嵌套结构中极容易漏掉引号导致 line 3 报错。扁平化且强制全是 String，是最稳的格式，且完全不影响最终出图效果。
-        base_json_struct = """{
-  "subject_appearance": "flawless anatomical correctness, physically accurate human proportions, ultra-detailed skin texture, realistic pores",
-  "clothing_and_accessories": "specify real-world fabric textures like thick knit, worn denim",
-  "pose_and_action": "CRITICAL: EXACTLY ONE specific pose. NEVER use words like various or multiple. Obey real-world gravity.",
-  "environment_and_scene": "describe the specific location, atmosphere, and props",
-  "lighting_and_mood": "physically accurate lighting like volumetric sunlight, cinematic chiaroscuro, realistic shadows",
-  "technical_specs": "specific real-world camera like ARRI Alexa 65, focal length, aperture, single frame, solo, ultra photorealistic, raw photo"
-}"""
-
-        if count == 1:
-            sys_prompt = f"""You are an elite Cinematographer, Anatomist, and AI Prompt Engineer.
-Output ONLY ONE valid JSON object based on the user's action.
-CRITICAL RULES:
-1. Output MUST be a valid JSON object. ALL keys and values MUST be strings.
-2. Escape any inner double quotes with a backslash (\\"). Do NOT use unescaped quotes inside strings.
-3. ABSOLUTELY NO collages, grids, or multiple views. Describe exactly ONE single frozen moment.
-4. HYPER-REALISM RULE: Ensure strict anatomical correctness, real-world physics, and physically accurate lighting.
-5. Do NOT use cartoonish descriptions unless explicitly requested. Focus on real-world photographic precision.
-OUTPUT FORMAT (Use these exact keys):
-{base_json_struct}"""
-        else:
-            sys_prompt = f"""You are an elite Cinematographer, Anatomist, and AI Prompt Engineer.
-Generate EXACTLY {count} distinct variations of the user's action.
-CRITICAL RULES:
-1. Output MUST be a valid JSON object containing a "results" array. ALL keys and values MUST be strings.
-2. Escape any inner double quotes with a backslash (\\"). Do NOT use unescaped quotes inside strings.
-3. ANTI-COLLAGE RULE: Each JSON object represents ONE SINGLE IMAGE. Pick exactly ONE specific pose and ONE camera angle per object!
-4. Ensure subject appearance remains identical across all objects, but vary technical specs, pose, and environment.
-
-OUTPUT FORMAT:
-{{
-  "results": [
-    {base_json_struct},
-    ... (repeat {count} times)
-  ]
-}}"""
-
-        payload = {
-            "model": self.config.optimizer_model,
-            "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": raw_action}],
-            "max_tokens": 1200 if count > 1 else 600, 
-            "temperature": 0.8,
-            "response_format": {"type": "json_object"} 
-        }
-
-        async with aiohttp.ClientSession() as session:
-            try:
-                timeout_val = self.config.optimizer_timeout * (1.5 if count > 1 else 1.0)
-                logger.info(f"🧠 [副脑] 正在重构 {count} 组独立提示词 (双重防拼图模式, 模型: {self.config.optimizer_model})")
-                
-                async with session.post(endpoint, headers=headers, json=payload, timeout=timeout_val) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    
-                    if "choices" in data and len(data["choices"]) > 0:
-                        raw_content = data["choices"][0]["message"]["content"].strip()
-                        
-                        # 🚀 终极防弹提取：无视大模型所有的前置和后置废话
-                        start_idx = raw_content.find('{')
-                        end_idx = raw_content.rfind('}')
-                        
-                        if start_idx != -1 and end_idx != -1 and end_idx >= start_idx:
-                            clean_json_str = raw_content[start_idx:end_idx+1]
-                        else:
-                            clean_json_str = raw_content
-                            
-                        # 🚀 极限容错：提前用 Python 修复大模型最爱犯的 3 种低级语法错误
-                        clean_json_str = clean_json_str.replace('\n', ' ').replace('\r', '') # 1. 修复字符串内未转义换行符导致的报错
-                        clean_json_str = re.sub(r',\s*}', '}', clean_json_str)               # 2. 修复结尾多余的逗号
-                        clean_json_str = re.sub(r',\s*]', ']', clean_json_str)               # 3. 修复数组结尾多余的逗号
-                        
-                        try:
-                            prompt_data = json.loads(clean_json_str)
-                            results = []
-                            
-                            items = []
-                            if count == 1:
-                                items = [prompt_data]
-                            else:
-                                items = prompt_data.get("results", [])
-                                if not items and isinstance(prompt_data, list):
-                                    items = prompt_data
-                                    
-                            for item in items:
-                                # 🚀 终极防拼图锁死 (安全折行拼接)
-                                item["HARDCODED_ANTI_COLLAGE_RULE"] = (
-                                    "1girl, solo, single image, one single frame, complete and unified scene, "
-                                    "NO grid, NO collage, NO split screen, NO character sheet, NO multiple views, NO comic panels"
-                                )
-                                
-                                json_str = json.dumps(item, ensure_ascii=False, indent=2)
-                                results.append(json_str)
-                            
-                            while len(results) < count:
-                                results.append(results[0] if results else raw_action)
-                                
-                            logger.info(f"✨ [副脑] 成功提取 {len(results[:count])} 组防拼图 JSON！")
-                            return results[:count]
-                            
-                        except Exception as e:
-                            # 如果再次失败，打印出到底大模型写了什么垃圾，方便排查
-                            logger.warning(f"⚠️ [副脑] 原生 JSON 解析失败: {e} | 原始残骸: {clean_json_str[:200]}...")
-                            return [raw_action] * count
             except Exception as e:
                 logger.warning(f"⚠️ [副脑降级] ({str(e)})")
                 return [raw_action] * count
