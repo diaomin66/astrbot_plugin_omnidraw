@@ -2,6 +2,6 @@ name: astrbot_plugin_omnidraw
 display_name: 万象画卷
 desc: 占用低、速度快、配置简洁、质量高的生图插件。支持文生图与图生图、人设自拍；兼容openai；支持 LLM 工具自然调用、指令直接出图、使用权限管理（QQ）。新增视频生成，采用静默幽灵式获取。拥有强大的副脑（提示词优化）功能
 help: 发送 /万象帮助 查看说明
-version: 0.9.0
+version: 1.0.0
 author: 雪碧bir
 repo: https://github.com/diaomin66/astrbot_plugin_omnidraw/

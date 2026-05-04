@@ -30,6 +30,7 @@ class PluginConfig:
     persona_base_prompt: str
     persona_ref_image: str
     allowed_users: List[str]
+    enable_detailed_report: bool
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any], data_dir: str) -> "PluginConfig":
@@ -98,6 +99,7 @@ class PluginConfig:
         opt_conf = config_dict.get("optimizer_config", {})
         router_conf = config_dict.get("router_config", {})
         perm_conf = config_dict.get("permission_config", {})
+        interaction_conf = config_dict.get("interaction_config", {})
 
         raw_image = persona_conf.get("persona_ref_image", "")
         ref_path = ""
@@ -145,7 +147,8 @@ class PluginConfig:
             persona_name=str(persona_conf.get("persona_name", "默认助理")),
             persona_base_prompt=str(persona_conf.get("persona_base_prompt", "")),
             persona_ref_image=ref_path,
-            allowed_users=allowed_users
+            allowed_users=allowed_users,
+            enable_detailed_report=bool(interaction_conf.get("enable_detailed_report", False))
         )
 
     def get_provider(self, provider_id: str) -> Optional[ProviderConfig]:

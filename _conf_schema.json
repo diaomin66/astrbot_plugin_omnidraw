@@ -56,6 +56,20 @@
       "手办化:masterpiece, best quality, 3d anime figure, octane render, blind box toy, chibi, tilt-shift, highly detailed, clean background"
     ]
   },
+  "interaction_config": {
+    "type": "object",
+    "description": "💬 交互显示",
+    "hint": "控制群聊中的任务汇报详细程度",
+    "items": {
+      "enable_detailed_report": {
+        "type": "bool",
+        "description": "生图参数汇报",
+        "hint": "关闭：使用极简提示，保持群聊清爽；开启：显示最终提示词、参数和参考图数量。",
+        "default": false
+      }
+    },
+    "default": {}
+  },
   "providers": {
     "description": "🎨 API 生图节点配置",
     "hint": "支持添加多个 OpenAI 兼容协议的生图节点",

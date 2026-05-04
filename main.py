@@ -380,12 +380,15 @@ class OmniDrawPlugin(Star):
             kwargs["user_refs"] = safe_refs
             actual_ref_count = len(safe_refs)
             
-        yield event.plain_result(
-            f"{MessageEmoji.PAINTING} 收到灵感，正在绘制...\n"
-            f"📝 最终提示词：{prompt}\n"
-            f"⚙️ 附加参数：{len(kwargs) - (1 if safe_refs else 0)} 个\n"
-            f"🖼️ 实际参考图：{actual_ref_count} 张"
-        )
+        if self.plugin_config.enable_detailed_report:
+            yield event.plain_result(
+                f"{MessageEmoji.PAINTING} 收到灵感，正在绘制...\n"
+                f"📝 最终提示词：{prompt}\n"
+                f"⚙️ 附加参数：{len(kwargs) - (1 if safe_refs else 0)} 个\n"
+                f"🖼️ 实际参考图：{actual_ref_count} 张"
+            )
+        else:
+            yield event.plain_result(f"{MessageEmoji.PAINTING} 收到灵感，正在绘制...")
         
         async with aiohttp.ClientSession() as session:
             chain_manager = ChainManager(self.plugin_config, session)
@@ -428,11 +431,14 @@ class OmniDrawPlugin(Star):
         else:
             extra_kwargs.pop("user_refs", None)
             
-        yield event.plain_result(
-            f"{MessageEmoji.INFO} 正在为「{self.plugin_config.persona_name}」生成自拍...\n"
-            f"✨ 副脑已重构提示词\n"
-            f"🖼️ 实际参考图：{actual_ref_count} 张"
-        )
+        if self.plugin_config.enable_detailed_report:
+            yield event.plain_result(
+                f"{MessageEmoji.INFO} 正在为「{self.plugin_config.persona_name}」生成自拍...\n"
+                f"✨ 副脑已重构提示词\n"
+                f"🖼️ 实际参考图：{actual_ref_count} 张"
+            )
+        else:
+            yield event.plain_result(f"{MessageEmoji.INFO} 正在为「{self.plugin_config.persona_name}」生成自拍，请稍候...")
         
         chain_to_use = "selfie" if "selfie" in self.plugin_config.chains else "text2img"
         async with aiohttp.ClientSession() as session:
@@ -459,12 +465,15 @@ class OmniDrawPlugin(Star):
         prompt, _ = self.cmd_parser.parse(message)
         safe_refs = await self._process_and_save_images(raw_refs)
         
-        yield event.plain_result(
-            f"{MessageEmoji.INFO} 视频任务已提交后台！\n"
-            f"📝 最终提示词：{prompt}\n"
-            f"🖼️ 实际参考图：{len(safe_refs)} 张\n"
-            f"⏳ 正在渲染，请稍候..."
-        )
+        if self.plugin_config.enable_detailed_report:
+            yield event.plain_result(
+                f"{MessageEmoji.INFO} 视频任务已提交后台！\n"
+                f"📝 最终提示词：{prompt}\n"
+                f"🖼️ 实际参考图：{len(safe_refs)} 张\n"
+                f"⏳ 正在渲染，请稍候..."
+            )
+        else:
+            yield event.plain_result(f"{MessageEmoji.INFO} 视频任务已提交后台！正在渲染，请稍候...")
         asyncio.create_task(self.video_manager.background_task_runner(event, prompt, safe_refs))
 
     # ==========================================
