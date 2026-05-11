@@ -87,8 +87,8 @@ class VideoManager:
         return f"HTTP {response.status}: {text[:1000]}"
 
     async def _poll_task_result(self, provider: ProviderConfig, task_id: str, session: aiohttp.ClientSession) -> str:
-        base_url = provider.base_url.rstrip("/")
-        poll_url = f"{base_url}/videos/generations/{task_id}"
+        endpoint = build_video_generations_endpoint(provider.base_url)
+        poll_url = f"{endpoint}/{task_id}"
         headers = {
             "Authorization": f"Bearer {self._get_api_key(provider)}",
             "Content-Type": "application/json",
