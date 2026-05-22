@@ -265,6 +265,19 @@ class CustomEndpointProviderTest(unittest.IsolatedAsyncioTestCase):
     def _log_text(self):
         return "\n".join(message for _, message in fake_logger.messages)
 
+    def _prompt_log_text(self):
+        return "\n".join(message for _, message in fake_logger.messages if "核心提示词" in message)
+
+    def _request_summary_log_text(self):
+        return "\n".join(
+            message
+            for _, message in fake_logger.messages
+            if "请求体摘要" in message or "高级参数" in message or "透传摘要" in message
+        )
+
+    def _non_prompt_log_text(self):
+        return "\n".join(message for _, message in fake_logger.messages if "核心提示词" not in message)
+
     async def test_posts_exact_image_endpoint(self):
         endpoint = "https://api.example.com/v1/images/generations"
         provider, session = self._provider(endpoint, {"data": [{"url": "https://cdn.example.com/out.png"}]})
@@ -417,11 +430,15 @@ class CustomEndpointProviderTest(unittest.IsolatedAsyncioTestCase):
                 logs = self._log_text()
                 self.assertNotIn(secret, logs)
                 self.assertNotIn(raw_b64[:40], logs)
-                self.assertNotIn(long_prompt, logs)
-                self.assertNotIn("PROMPT_TAIL_SHOULD_NOT_LOG", logs)
+                self.assertIn(long_prompt, self._prompt_log_text())
+                self.assertIn("PROMPT_TAIL_SHOULD_NOT_LOG", self._prompt_log_text())
                 self.assertIn("<redacted>", logs)
                 self.assertIn("<image_base64", logs)
-                self.assertIn("<prompt chars=", logs)
+                summary_logs = self._request_summary_log_text()
+                self.assertNotIn(long_prompt, summary_logs)
+                self.assertNotIn("PROMPT_TAIL_SHOULD_NOT_LOG", summary_logs)
+                if provider_cls is not OpenAIChatProvider:
+                    self.assertIn("<prompt chars=", summary_logs)
 
     async def test_short_prompts_and_custom_endpoint_queries_do_not_leak_to_logs(self):
         short_prompt = "draw a cat"
@@ -470,10 +487,17 @@ class CustomEndpointProviderTest(unittest.IsolatedAsyncioTestCase):
                 if provider_cls is CustomEndpointProvider:
                     self.assertEqual(session.posts[0]["url"], endpoint)
                 logs = self._log_text()
-                self.assertNotIn(short_prompt, logs)
+                self.assertIn(short_prompt, self._prompt_log_text())
+                self.assertNotIn(short_prompt, self._request_summary_log_text())
                 self.assertNotIn(query_secret, logs)
                 self.assertNotIn("1024x1024", logs)
-                self.assertIn("<prompt chars=", logs)
+                if provider_cls is not OpenAIChatProvider:
+                    summary_logs = self._request_summary_log_text()
+                    self.assertTrue(
+                        "<prompt chars=" in summary_logs
+                        or "<text chars=" in summary_logs
+                        or "<input chars=" in summary_logs
+                    )
                 if query_secret in endpoint:
                     self.assertIn("api_key=<redacted>", logs)
 
@@ -529,11 +553,12 @@ class CustomEndpointProviderTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(RuntimeError) as raised:
                     await provider.generate_image("draw a cat")
 
-                combined = str(raised.exception) + "\n" + self._log_text()
+                combined = str(raised.exception) + "\n" + self._non_prompt_log_text()
                 self.assertNotIn(query_secret, combined)
                 self.assertNotIn("draw a cat", combined)
                 self.assertIn("API key=<redacted>", combined)
                 self.assertIn("prompt=<redacted>", combined)
+                self.assertIn("draw a cat", self._prompt_log_text())
 
     async def test_unexpected_success_response_exception_is_summarized(self):
         raw_b64 = base64.b64encode(b"unexpected-success-image" * 35).decode("ascii")

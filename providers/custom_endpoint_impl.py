@@ -188,7 +188,7 @@ class CustomEndpointProvider(BaseProvider):
         api_kwargs = {key: value for key, value in kwargs.items() if key not in internal_keys}
         headers = {"Authorization": "Bearer " + current_key}
 
-        logger.info(f"📝 [自定义通道] 最终提示词摘要: {summarize_text_for_log(prompt, key_hint='prompt')}")
+        logger.info(f"📝 [自定义通道] 最终发送给 API 的核心提示词:\n{prompt}")
 
         if endpoint_path.endswith("/images/edits") and not ref_images:
             raise ValueError("自定义 /images/edits 完整路径需要至少一张参考图。")

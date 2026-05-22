@@ -15,7 +15,6 @@ from .base import (
     guess_image_content_type,
     summarize_payload_json_for_log,
     summarize_response_text_for_log,
-    summarize_text_for_log,
 )
 
 class OpenAIChatProvider(BaseProvider):
@@ -86,7 +85,7 @@ class OpenAIChatProvider(BaseProvider):
             "text": full_prompt
         })
         
-        logger.info(f"📝 [Chat/Vision通道] 最终提示词摘要: {summarize_text_for_log(prompt, key_hint='prompt')}")
+        logger.info(f"📝 [Chat/Vision通道] 最终发送给 API 的核心提示词:\n{prompt}")
 
         payload = {
             "model": self.config.model,
