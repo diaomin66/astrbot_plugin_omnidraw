@@ -12,6 +12,32 @@ class PromptOptimizer:
     def __init__(self, config: PluginConfig):
         self.config = config
 
+    async def _read_chat_response(self, resp: aiohttp.ClientResponse) -> dict:
+        content_type = resp.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "text/event-stream":
+            return await resp.json()
+
+        content_parts = []
+        for line in (await resp.text()).splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            data_line = line[5:].strip()
+            if not data_line or data_line == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(data_line)
+            except Exception:
+                continue
+            for choice in chunk.get("choices", []):
+                delta = choice.get("delta", {})
+                message = choice.get("message", {})
+                content = delta.get("content") or message.get("content")
+                if content:
+                    content_parts.append(content)
+
+        return {"choices": [{"message": {"content": "".join(content_parts)}}]}
+
     async def optimize(self, raw_action: str, count: int = 1, session: Optional[aiohttp.ClientSession] = None) -> list:
         if not getattr(self.config, "enable_optimizer", True):
             return [raw_action] * count
@@ -154,7 +180,8 @@ OUTPUT FORMAT:
             "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": raw_action}],
             "max_tokens": 4000 if count > 1 else 2500, 
             "temperature": 0.8,
-            "response_format": {"type": "json_object"} 
+            "response_format": {"type": "json_object"},
+            "stream": False,
         }
 
         session_obj = session
@@ -170,7 +197,7 @@ OUTPUT FORMAT:
 
                 async with session_obj.post(endpoint, headers=headers, json=payload, timeout=timeout_val) as resp:
                     resp.raise_for_status()
-                    data = await resp.json()
+                    data = await self._read_chat_response(resp)
 
                     if "choices" in data and len(data["choices"]) > 0:
                         raw_content = data["choices"][0]["message"]["content"].strip()

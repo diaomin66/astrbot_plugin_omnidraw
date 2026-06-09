@@ -131,6 +131,7 @@ openai_chat_module = importlib.import_module(f"{PACKAGE_NAME}.providers.openai_c
 provider_factory_module = importlib.import_module(f"{PACKAGE_NAME}.providers")
 chain_manager_module = importlib.import_module(f"{PACKAGE_NAME}.core.chain_manager")
 video_manager_module = importlib.import_module(f"{PACKAGE_NAME}.core.video_manager")
+prompt_optimizer_module = importlib.import_module(f"{PACKAGE_NAME}.core.prompt_optimizer")
 main_module = importlib.import_module(f"{PACKAGE_NAME}.main")
 
 ProviderConfig = models_module.ProviderConfig
@@ -140,6 +141,7 @@ ChainRunResult = chain_manager_module.ChainRunResult
 ChainManager = chain_manager_module.ChainManager
 OmniDrawPlugin = main_module.OmniDrawPlugin
 VideoManager = video_manager_module.VideoManager
+PromptOptimizer = prompt_optimizer_module.PromptOptimizer
 extract_error_message = base_module.extract_error_message
 extract_image_url_from_response = base_module.extract_image_url_from_response
 is_complete_endpoint_url = base_module.is_complete_endpoint_url
@@ -157,14 +159,21 @@ def _long_b64() -> str:
 
 
 class FakeResponse:
-    def __init__(self, payload, status=200):
+    def __init__(self, payload, status=200, content_type="application/json"):
         self.payload = payload
         self.status = status
+        self.headers = {"Content-Type": content_type}
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise RuntimeError(f"HTTP {self.status}")
 
     async def text(self):
         return self.payload if isinstance(self.payload, str) else json.dumps(self.payload)
 
     async def json(self):
+        if self.headers.get("Content-Type") == "text/event-stream":
+            raise ValueError("Attempt to decode JSON with unexpected mimetype: text/event-stream")
         if isinstance(self.payload, str):
             return json.loads(self.payload)
         return self.payload
@@ -419,6 +428,79 @@ class GenerationMetadataConfigTest(unittest.TestCase):
 
         self.assertTrue(config.show_generation_time)
         self.assertFalse(config.show_request_model)
+
+
+class PromptOptimizerTest(unittest.IsolatedAsyncioTestCase):
+    def _config(self):
+        return PluginConfig.from_dict(
+            {
+                "providers": [
+                    {
+                        "id": "node_1",
+                        "api_type": "openai_chat",
+                        "base_url": "https://api.example.com/v1",
+                        "api_keys": "test-key",
+                        "model": "text-model",
+                    }
+                ],
+                "optimizer_config": {
+                    "chain_optimizer": "node_1",
+                    "optimizer_model": "text-model",
+                    "optimizer_timeout": 15,
+                },
+            },
+            str(PLUGIN_DIR),
+        )
+
+    def _chat_payload(self, content):
+        return {"choices": [{"message": {"content": json.dumps(content)}}]}
+
+    async def test_optimizer_requests_non_streaming_chat_completion(self):
+        session = FakeSession(
+            FakeResponse(
+                self._chat_payload(
+                    {
+                        "subject_appearance": "a relaxed person",
+                        "clothing_and_accessories": "casual clothes",
+                        "pose_and_action": "standing naturally",
+                        "environment_and_scene": "a quiet room",
+                        "lighting_and_mood": "soft window light",
+                        "technical_specs": "smartphone photo",
+                        "realism_and_quality_guardrails": "natural anatomy",
+                    }
+                )
+            )
+        )
+
+        await PromptOptimizer(self._config()).optimize("站着", session=session)
+
+        self.assertFalse(session.posts[0]["json"]["stream"])
+
+    async def test_optimizer_parses_event_stream_chat_completion(self):
+        content = json.dumps(
+            {
+                "subject_appearance": "a relaxed person",
+                "clothing_and_accessories": "casual clothes",
+                "pose_and_action": "standing naturally",
+                "environment_and_scene": "a quiet room",
+                "lighting_and_mood": "soft window light",
+                "technical_specs": "smartphone photo",
+                "realism_and_quality_guardrails": "natural anatomy",
+            }
+        )
+        stream = "\n".join(
+            [
+                'data: {"choices":[{"delta":{"content":' + json.dumps(content[:40]) + '}}]}',
+                'data: {"choices":[{"delta":{"content":' + json.dumps(content[40:]) + '}}]}',
+                "data: [DONE]",
+            ]
+        )
+        session = FakeSession(FakeResponse(stream, content_type="text/event-stream"))
+
+        results = await PromptOptimizer(self._config()).optimize("站着", session=session)
+
+        self.assertIn("a relaxed person", results[0])
+        self.assertIn("standing naturally", results[0])
 
 
 class RuntimeConfigKeyTest(unittest.TestCase):
