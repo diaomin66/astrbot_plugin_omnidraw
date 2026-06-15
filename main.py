@@ -2336,6 +2336,18 @@ class OmniDrawPlugin(Star):
     ) -> str:
         """
         以此 AI 助理的固定人设拍摄自拍。
+
+        返回 JSON 格式：
+        {
+            "status": "success" | "error",
+            "images": ["图片URL1", "图片URL2", ...],  // 成功时返回图片URL列表
+            "count": 整数,  // 成功生成的图片数量
+            "message": "人类可读的提示消息"
+        }
+
+        使用示例：调用本工具后，可以从返回的 JSON 中提取 images 字段，
+        传递给其他工具（如 qzone_publish_post 的 media 参数）。
+
         Args:
             action (string): 动作、姿态、服装、场景或画面描述。
             count (int): 需要生成的图片数量。默认为 1。
@@ -2379,12 +2391,38 @@ class OmniDrawPlugin(Star):
             valid_results = [result for result in results if self._get_image_result_url(result)]
             if not valid_results:
                 raise RuntimeError("所有绘图节点请求失败")
+
+            # 提取图片 URL 列表，用于跨工具传递
+            # 为避免日志中输出大量 base64 数据，对 Data URL 进行简化处理
+            image_urls = []
+            for result in valid_results:
+                url = self._get_image_result_url(result)
+                # 如果是 Data URL (base64)，用占位符代替以避免日志污染
+                if url.startswith("data:image/"):
+                    # 只保留前100个字符作为引用
+                    image_urls.append(url[:100] + "...[truncated]")
+                else:
+                    image_urls.append(url)
+
+            # 发送图片到聊天（保持原有功能）
             sent = await self._send_generated_images(event, valid_results)
             self._record_generated_images(event, sent)
-            return f"系统提示：已成功生成并下发了 {sent} 张图。"
+
+            # 返回 JSON 格式，便于 LLM 解析并传递给其他工具
+            import json
+            return json.dumps({
+                "status": "success",
+                "images": image_urls,
+                "count": sent,
+                "message": f"已成功生成并下发了 {sent} 张自拍照片。图片已发送到聊天，可通过消息事件获取。"
+            }, ensure_ascii=False)
         except Exception as exc:
             logger.error(f"[OmniDraw] LLM 自拍工具失败: {exc}", exc_info=True)
-            return f"系统提示：画图失败 ({exc})。"
+            import json
+            return json.dumps({
+                "status": "error",
+                "message": f"画图失败: {exc}"
+            }, ensure_ascii=False)
 
     @llm_tool(name="generate_image")
     async def tool_generate_image(
@@ -2398,6 +2436,18 @@ class OmniDrawPlugin(Star):
     ) -> str:
         """
         AI 画图工具。当用户提出明确的画面要求你画出来时调用此工具。
+
+        返回 JSON 格式：
+        {
+            "status": "success" | "error",
+            "images": ["图片URL1", "图片URL2", ...],  // 成功时返回图片URL列表
+            "count": 整数,  // 成功生成的图片数量
+            "message": "人类可读的提示消息"
+        }
+
+        使用示例：调用本工具后，可以从返回的 JSON 中提取 images 字段，
+        传递给其他工具（如 qzone_publish_post 的 media 参数）。
+
         Args:
             prompt (string): 图片提示词，描述主体、风格、场景、构图和细节。
             count (int): 图片数量。默认为 1。
@@ -2435,12 +2485,38 @@ class OmniDrawPlugin(Star):
             valid_results = [result for result in results if self._get_image_result_url(result)]
             if not valid_results:
                 raise RuntimeError("所有绘图节点请求失败")
+
+            # 提取图片 URL 列表，用于跨工具传递
+            # 为避免日志中输出大量 base64 数据，对 Data URL 进行简化处理
+            image_urls = []
+            for result in valid_results:
+                url = self._get_image_result_url(result)
+                # 如果是 Data URL (base64)，用占位符代替以避免日志污染
+                if url.startswith("data:image/"):
+                    # 只保留前100个字符作为引用
+                    image_urls.append(url[:100] + "...[truncated]")
+                else:
+                    image_urls.append(url)
+
+            # 发送图片到聊天（保持原有功能）
             sent = await self._send_generated_images(event, valid_results)
             self._record_generated_images(event, sent)
-            return f"系统提示：已成功下发 {sent} 张图。"
+
+            # 返回 JSON 格式，便于 LLM 解析并传递给其他工具
+            import json
+            return json.dumps({
+                "status": "success",
+                "images": image_urls,
+                "count": sent,
+                "message": f"已成功下发 {sent} 张图片。图片已发送到聊天，可通过消息事件获取。"
+            }, ensure_ascii=False)
         except Exception as exc:
             logger.error(f"[OmniDraw] LLM 画图工具失败: {exc}", exc_info=True)
-            return f"系统提示：画图失败 ({exc})。"
+            import json
+            return json.dumps({
+                "status": "error",
+                "message": f"画图失败: {exc}"
+            }, ensure_ascii=False)
 
     @llm_tool(name="generate_video")
     async def tool_generate_video(
@@ -2454,6 +2530,16 @@ class OmniDrawPlugin(Star):
     ) -> str:
         """
         AI 视频生成工具。当用户要求生成一段视频时调用。
+
+        注意：视频生成为后台异步任务，本工具返回后视频仍在渲染中。
+
+        返回 JSON 格式：
+        {
+            "status": "success" | "error",
+            "task_count": 整数,  // 提交的后台任务数量
+            "message": "人类可读的提示消息"
+        }
+
         Args:
             prompt (string): 视频提示词，描述画面、动作、镜头运动、时长感和风格。
             count (int): 视频数量。默认为 1。
@@ -2492,7 +2578,17 @@ class OmniDrawPlugin(Star):
                         include_metadata=False,
                     )
                 )
-            return f"系统提示：已在后台独立提交了 {count} 个视频渲染任务。请告诉用户正在渲染中。"
+            # 返回 JSON 格式
+            import json
+            return json.dumps({
+                "status": "success",
+                "task_count": count,
+                "message": f"已在后台独立提交了 {count} 个视频渲染任务。请告诉用户正在渲染中。"
+            }, ensure_ascii=False)
         except Exception as exc:
             logger.error(f"[OmniDraw] LLM 视频工具失败: {exc}", exc_info=True)
-            return f"系统提示：失败 ({exc})。"
+            import json
+            return json.dumps({
+                "status": "error",
+                "message": f"失败: {exc}"
+            }, ensure_ascii=False)
