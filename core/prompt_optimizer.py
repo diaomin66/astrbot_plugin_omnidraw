@@ -12,6 +12,50 @@ class PromptOptimizer:
     def __init__(self, config: PluginConfig):
         self.config = config
 
+    async def _read_chat_response(self, resp: aiohttp.ClientResponse) -> dict:
+        """智能解析聊天完成响应，自动处理流式和非流式响应。
+
+        当响应为 text/event-stream 时，解析 SSE 流并重组消息；
+        否则直接解析为 JSON。这样即使服务器忽略 stream=false 参数
+        强制返回流式响应，也能正常工作。
+        """
+        # 先读取文本内容（这样可以多次尝试解析）
+        text_content = await resp.text()
+
+        # 首先尝试 JSON 解析（无论 Content-Type 是什么）
+        # 因为有些服务器会错误地设置 Content-Type 为 text/event-stream 但返回普通 JSON
+        try:
+            return json.loads(text_content)
+        except Exception:
+            # 如果 JSON 解析失败，尝试作为 SSE 流解析
+            pass
+
+        # 解析 SSE 流
+        content_parts = []
+        for line in text_content.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            data_line = line[5:].strip()
+            if not data_line or data_line == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(data_line)
+            except Exception:
+                continue
+            for choice in chunk.get("choices", []):
+                delta = choice.get("delta", {})
+                message = choice.get("message", {})
+                content = delta.get("content") or message.get("content")
+                if content:
+                    content_parts.append(content)
+
+        if content_parts:
+            return {"choices": [{"message": {"content": "".join(content_parts)}}]}
+
+        # 如果 SSE 解析也失败了，返回空响应（让上层处理）
+        return {"choices": [{"message": {"content": ""}}]}
+
     async def optimize(self, raw_action: str, count: int = 1, session: Optional[aiohttp.ClientSession] = None) -> list:
         if not getattr(self.config, "enable_optimizer", True):
             return [raw_action] * count
@@ -170,7 +214,7 @@ OUTPUT FORMAT:
 
                 async with session_obj.post(endpoint, headers=headers, json=payload, timeout=timeout_val) as resp:
                     resp.raise_for_status()
-                    data = await resp.json()
+                    data = await self._read_chat_response(resp)
 
                     if "choices" in data and len(data["choices"]) > 0:
                         raw_content = data["choices"][0]["message"]["content"].strip()
