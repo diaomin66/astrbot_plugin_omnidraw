@@ -218,6 +218,64 @@ https://github.com/diaomin66/astrbot_plugin_omnidraw/
 
 ---
 
+## 给其他插件调用并获取图片
+
+默认的 LLM 工具 `generate_image` 行为保持不变：生成后会直接把图片下发到当前聊天，并返回“已成功下发 N 张图”的文本。
+
+如果其他插件需要“调用万象画卷生图，然后自己拿到图片继续处理”，请显式传入 `return_result=true`。此时不会自动下发图片，而是返回 JSON 字符串：
+
+```json
+{
+  "success": true,
+  "message": "已成功生成 1 张图片。",
+  "images": [
+    {
+      "image_url": "https://example.com/out.png",
+      "source_type": "url",
+      "url": "https://example.com/out.png",
+      "file_path": "",
+      "data_url": "",
+      "content_type": "image/png",
+      "provider_id": "image_node_1",
+      "model": "gpt-image-1",
+      "elapsed_seconds": 12.3,
+      "prompt": "实际用于请求的提示词"
+    }
+  ],
+  "count": 1,
+  "requested_count": 1,
+  "mode": "text2img",
+  "chain": "text2img"
+}
+```
+
+可选参数：
+
+- `return_result=true`：启用返回式生图；不传或为 `false` 时保持原自动下发行为。
+- `refs`：参考图 URL、本地路径或 data URL；多个参考图可用换行分隔，也可传 JSON 数组字符串。
+- `aspect_ratio`、`size`、`extra_params`：与普通 `generate_image` 一致。
+- 自拍模式请调用现有 `generate_selfie(return_result=true)` 工具，不需要新增 `generate_selfie_image`。返回结构相同，`mode` 为 `selfie`，会按 `/自拍` 的逻辑构建人设提示词并优先走自拍链路；未传 `refs` 时使用当前激活人设参考图。
+
+也可以调用 Web API：
+
+```http
+POST /astrbot_plugin_omnidraw/generate_image_for_plugin
+Content-Type: application/json
+
+{
+  "prompt": "一只橘猫坐在霓虹灯下",
+  "count": 1,
+  "refs": ["https://example.com/ref.png"],
+  "size": "1024x1024"
+}
+```
+
+Web API 返回同样的 JSON 结构。自拍模式可传 `{"mode": "selfie", "action": "看着镜头微笑"}`，也兼容 `{"selfie": true}`。为了避免绕过具体用户上下文，Web API 不会自动扣用户额度；通过 `generate_image(return_result=true)` 或 `generate_selfie(return_result=true)` 且传入事件上下文时，会沿用原权限和额度逻辑。
+
+失败时同样返回 JSON（`success=false`、`images=[]`），便于调用方稳定解析；错误文本会自动脱敏 API Key、Bearer Token 和图片 Base64，避免把敏感信息透传给其他插件或聊天上下文。
+
+---
+
 ## 图片参考怎么用
 
 ### 图生图 / 改图

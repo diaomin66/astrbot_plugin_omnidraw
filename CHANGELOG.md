@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.3.19
+
+- 新增面向其他插件的“返回式生图”能力：`generate_image` 函数工具在显式传入 `return_result=true` 时不再自动下发图片，而是返回包含图片 URL/本地路径/元数据的 JSON；默认行为保持原样。
+- 新增 Web API `POST /astrbot_plugin_omnidraw/generate_image_for_plugin`，便于其他插件通过 HTTP 调用万象画卷生图并获取图片结果。
+- 返回式生图支持自拍模式：现有 `generate_selfie(return_result=true)` 会返回图片 JSON，并按自拍链路与当前人设参考图生成。
+- 优化返回式生图稳定性：异常场景保持 JSON 返回，结果聚合不再因提示词与结果数量不一致而漏掉成功图片。
+- 加强安全与可用性：返回给调用方的错误会自动脱敏 API Key、Bearer Token 和图片 Base64；参考图支持 JSON 对象入参、自动去重，并对本地参考图增加大小限制保护。
+
 ## 3.3.18
 
 - 新增 `/查看预设` 指令：无参数时只列出所有预设名，不展示提示词；带预设名时显示该预设详情。

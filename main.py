@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from urllib.parse import parse_qs, urlparse
-from typing import Any, AsyncGenerator, Dict, Iterable, List, Optional
+from typing import Any, AsyncGenerator, Dict, Iterable, List, Optional, Tuple
 
 import aiohttp
 from quart import jsonify, request, send_file
@@ -65,6 +65,7 @@ from .utils import handle_errors, save_image_bytes, split_data_url
 PAGE_PREVIEW_IMAGE_BYTES = 80 * 1024 * 1024
 NATIVE_ACTIVE_PERSONA_FILE_PREFIX = "files/persona_config/persona_ref_image/"
 CACHE_DIR_NAMES = ("temp_images", "user_refs")
+PLUGIN_RESULT_ERROR_MAX_LENGTH = 240
 CACHE_IMAGE_EXTENSIONS = frozenset({
     ".png",
     ".jpg",
@@ -159,6 +160,12 @@ class OmniDrawPlugin(Star):
             self.get_image_handler,
             ["GET"],
             "获取万象画卷本地参考图预览",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/generate_image_for_plugin",
+            self.generate_image_for_plugin_handler,
+            ["POST"],
+            "为其他插件生成图片并返回结果",
         )
 
     def _resolve_data_dir(self) -> str:
@@ -748,6 +755,35 @@ class OmniDrawPlugin(Star):
         mime_type = mimetypes.guess_type(image_path)[0] or "image/png"
         return await send_file(image_path, mimetype=mime_type)
 
+    async def generate_image_for_plugin_handler(self):
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
+
+        try:
+            result = await self.generate_images_for_plugin(
+                prompt=str(payload.get("prompt", payload.get("action", "")) or ""),
+                count=payload.get("count", 1),
+                aspect_ratio=str(payload.get("aspect_ratio", "") or ""),
+                size=str(payload.get("size", "") or ""),
+                extra_params=str(payload.get("extra_params", "") or ""),
+                refs=payload.get("refs", payload.get("user_refs", [])),
+                mode="selfie" if "selfie" in payload and self._plugin_bool(payload.get("selfie"), default=False) else str(
+                    payload.get("mode", payload.get("chain_type", payload.get("type", ""))) or ""
+                ),
+                event=None,
+                record_usage=False,
+            )
+            status_code = 200 if result.get("success") else 500
+            return jsonify(result), status_code
+        except Exception as exc:
+            logger.error(f"[OmniDraw] 插件生图 API 失败: {exc}", exc_info=True)
+            return jsonify({
+                "success": False,
+                "message": f"画图失败 ({self._safe_plugin_error_message(exc)})。",
+                "images": [],
+            }), 500
+
     async def save_config_handler(self):
         new_config = await request.get_json(silent=True)
         if not isinstance(new_config, dict):
@@ -1185,6 +1221,15 @@ class OmniDrawPlugin(Star):
                 if not img_ref.startswith("http"):
                     abs_path = os.path.abspath(img_ref)
                     if os.path.exists(abs_path):
+                        try:
+                            if os.path.getsize(abs_path) > MAX_IMAGE_BYTES:
+                                raise ValueError(f"图片超过大小限制 {MAX_IMAGE_BYTES // 1024 // 1024}MB")
+                        except OSError as exc:
+                            logger.warning(f"[OmniDraw] 本地参考图无法读取: {abs_path} ({exc})")
+                            continue
+                        except ValueError as exc:
+                            logger.warning(f"[OmniDraw] 本地参考图超过大小限制: {abs_path} ({exc})")
+                            continue
                         processed_paths.append(abs_path)
                     else:
                         logger.warning(f"[OmniDraw] 本地参考图不存在: {abs_path}")
@@ -1770,6 +1815,327 @@ class OmniDrawPlugin(Star):
 
         return None
 
+    def _as_plugin_image_refs(self, refs: Any) -> List[str]:
+        if refs is None:
+            return []
+        if isinstance(refs, str):
+            refs_text = refs.strip()
+            if not refs_text:
+                return []
+            if refs_text.startswith(("[", "{")):
+                try:
+                    return self._as_plugin_image_refs(json.loads(refs_text))
+                except Exception:
+                    pass
+            if refs_text.startswith("data:image"):
+                return [refs_text]
+            refs_iterable = re.split(r"[\r\n]+", refs_text)
+        elif isinstance(refs, (list, tuple, set)):
+            refs_iterable = refs
+        else:
+            refs_iterable = [refs]
+
+        normalized = []
+        for ref in refs_iterable:
+            if isinstance(ref, dict):
+                ref = (
+                    ref.get("image_url")
+                    or ref.get("data_url")
+                    or ref.get("url")
+                    or ref.get("file_path")
+                    or ref.get("path")
+                    or ""
+                )
+            ref_text = str(ref or "").strip()
+            if ref_text:
+                normalized.append(ref_text)
+        seen = set()
+        return [ref for ref in normalized if not (ref in seen or seen.add(ref))]
+
+    def _plugin_bool(self, value: Any, default: bool = True) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on", "启用", "是"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "禁用", "否"}:
+            return False
+        return default
+
+    def _plugin_generation_mode(self, mode: Any) -> str:
+        mode_text = str(mode or "").strip().lower()
+        if mode_text in {"selfie", "persona", "persona_selfie", "portrait", "自拍", "人设自拍"}:
+            return "selfie"
+        return "text2img"
+
+    def _normalize_plugin_prompts(self, prompts: Any, fallback_prompt: str, count: int) -> List[str]:
+        fallback_prompt = str(fallback_prompt or "").strip()
+        prompt_list = [
+            str(prompt or "").strip() or fallback_prompt
+            for prompt in (prompts or [])
+        ]
+        target_count = max(1, int(count or 1))
+        if len(prompt_list) < target_count:
+            prompt_list.extend([fallback_prompt] * (target_count - len(prompt_list)))
+        return prompt_list[:target_count]
+
+    def _safe_plugin_error_message(self, exc: Any) -> str:
+        text = str(exc or "").strip() or "未知错误"
+        text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}", r"\1<redacted>", text)
+        text = re.sub(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{7,}\b", "<redacted>", text)
+        text = re.sub(
+            r"(?i)\b(api[\s_-]*key|access[\s_-]*token|token|secret|authorization|password)\b"
+            r"\s*[:=]\s*['\"]?[^'\"\s,;})]+",
+            lambda match: f"{match.group(1)}=<redacted>",
+            text,
+        )
+        text = re.sub(r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+", "<image_data_url>", text)
+        if len(text) > PLUGIN_RESULT_ERROR_MAX_LENGTH:
+            text = text[: PLUGIN_RESULT_ERROR_MAX_LENGTH - 3].rstrip() + "..."
+        return text
+
+    def _serialize_plugin_image_result(
+        self,
+        result: Any,
+        index: int,
+        prompt: str = "",
+    ) -> Dict[str, Any]:
+        image_url = self._get_image_result_url(result)
+        source_type = "file"
+        url = ""
+        data_url = ""
+        file_path = ""
+        content_type = ""
+
+        if image_url.startswith("data:image"):
+            source_type = "data_url"
+            data_url = image_url
+            try:
+                image_bytes, content_type = split_data_url(image_url)
+                save_dir = os.path.join(self.data_dir, "temp_images")
+                file_path = save_image_bytes(image_bytes, save_dir, image_url, "plugin", index, content_type)
+                self._prune_cache_if_needed("temp_images", protected_paths=[file_path])
+            except Exception as exc:
+                logger.warning(f"[OmniDraw] 插件生图结果落盘失败: {exc}")
+        elif image_url.startswith("http"):
+            source_type = "url"
+            url = image_url
+            content_type = mimetypes.guess_type(image_url)[0] or ""
+        else:
+            file_path = os.path.abspath(image_url)
+            content_type = mimetypes.guess_type(file_path)[0] or ""
+
+        return {
+            "index": index,
+            "image_url": image_url,
+            "source_type": source_type,
+            "url": url,
+            "file_path": file_path,
+            "data_url": data_url,
+            "content_type": content_type,
+            "provider_id": getattr(result, "provider_id", ""),
+            "model": getattr(result, "model", ""),
+            "elapsed_seconds": getattr(result, "elapsed_seconds", None),
+            "prompt": prompt,
+        }
+
+    async def _run_text2img_generation(
+        self,
+        event: Optional[AstrMessageEvent],
+        prompt: str,
+        count: int,
+        aspect_ratio: str = "",
+        size: str = "",
+        extra_params: str = "",
+        refs: Any = None,
+    ) -> Dict[str, Any]:
+        async with aiohttp.ClientSession() as session:
+            optimized_actions = await self.prompt_optimizer.optimize(prompt, count, session=session)
+            optimized_actions = self._normalize_plugin_prompts(optimized_actions, prompt, count)
+            raw_refs = (
+                self._as_plugin_image_refs(refs)
+                if refs is not None
+                else (self._get_event_images(event) if event is not None else [])
+            )
+            safe_refs = await self._process_and_save_images(raw_refs, session=session)
+
+            kwargs = {"user_refs": safe_refs} if safe_refs else {}
+            if aspect_ratio:
+                kwargs["aspect_ratio"] = aspect_ratio
+            if size:
+                kwargs["size"] = size
+            kwargs.update(self._parse_extra_params(extra_params))
+
+            chain_manager = ChainManager(self.plugin_config, session)
+            tasks = [
+                chain_manager.run_chain_with_metadata("text2img", optimized_action, **kwargs)
+                for optimized_action in optimized_actions
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        return {
+            "prompts": optimized_actions,
+            "results": results,
+            "requested_count": count,
+            "raw_refs": raw_refs,
+            "safe_refs": safe_refs,
+            "mode": "text2img",
+            "chain": "text2img",
+        }
+
+    async def _run_selfie_generation(
+        self,
+        event: Optional[AstrMessageEvent],
+        action: str,
+        count: int,
+        aspect_ratio: str = "",
+        size: str = "",
+        extra_params: str = "",
+        refs: Any = None,
+    ) -> Dict[str, Any]:
+        async with aiohttp.ClientSession() as session:
+            fallback_action = action or "看着镜头微笑"
+            optimized_actions = await self.prompt_optimizer.optimize(fallback_action, count, session=session)
+            optimized_actions = self._normalize_plugin_prompts(optimized_actions, fallback_action, count)
+            raw_refs = (
+                self._as_plugin_image_refs(refs)
+                if refs is not None
+                else (self._get_event_images(event) if event is not None else [])
+            )
+            target_refs = raw_refs if raw_refs else self.plugin_config.persona_ref_images
+            safe_refs = await self._process_and_save_images(target_refs, session=session)
+            extra_param_kwargs = self._parse_extra_params(extra_params)
+
+            chain_to_use = "selfie" if self.plugin_config.chains.get("selfie") else "text2img"
+            chain_manager = ChainManager(self.plugin_config, session)
+            prompts = []
+            tasks = []
+            for optimized_action in optimized_actions:
+                final_prompt, kwargs = self.persona_manager.build_persona_prompt(optimized_action)
+                if safe_refs:
+                    kwargs["user_refs"] = safe_refs
+                    if not raw_refs:
+                        kwargs.pop("persona_ref", None)
+                if aspect_ratio:
+                    kwargs["aspect_ratio"] = aspect_ratio
+                if size:
+                    kwargs["size"] = size
+                kwargs.update(extra_param_kwargs)
+                prompts.append(final_prompt)
+                tasks.append(chain_manager.run_chain_with_metadata(chain_to_use, final_prompt, **kwargs))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        return {
+            "prompts": prompts,
+            "results": results,
+            "requested_count": count,
+            "raw_refs": raw_refs,
+            "safe_refs": safe_refs,
+            "mode": "selfie",
+            "chain": chain_to_use,
+        }
+
+    def _plugin_generation_response(self, generation: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Any]]:
+        images = []
+        valid_results = []
+        errors = []
+        prompts = list(generation.get("prompts", []) or [])
+        for index, result in enumerate(generation.get("results", []) or [], start=1):
+            result_prompt = str(prompts[index - 1]) if index <= len(prompts) else ""
+            if isinstance(result, Exception):
+                errors.append(self._safe_plugin_error_message(result))
+                continue
+            if not self._get_image_result_url(result):
+                errors.append(f"empty image result at index {index}")
+                continue
+            valid_results.append(result)
+            images.append(self._serialize_plugin_image_result(result, index, result_prompt))
+
+        if not images:
+            message = "所有绘图节点请求失败。"
+            if errors:
+                message = f"{message} {'; '.join(errors)}"
+            return {"success": False, "message": message, "images": [], "errors": errors}, []
+
+        response = {
+            "success": True,
+            "message": f"已成功生成 {len(images)} 张图片。",
+            "images": images,
+            "count": len(images),
+            "requested_count": generation.get("requested_count", len(images)),
+            "ref_count": len(generation.get("raw_refs", [])),
+            "processed_ref_count": len(generation.get("safe_refs", [])),
+            "mode": generation.get("mode", "text2img"),
+            "chain": generation.get("chain", generation.get("mode", "text2img")),
+        }
+        if errors:
+            response["errors"] = errors
+        return response, valid_results
+
+    async def generate_images_for_plugin(
+        self,
+        prompt: str,
+        count: int = 1,
+        aspect_ratio: str = "",
+        size: str = "",
+        extra_params: str = "",
+        refs: Any = None,
+        mode: str = "",
+        event: Optional[AstrMessageEvent] = None,
+        record_usage: bool = False,
+    ) -> Dict[str, Any]:
+        """Generate image(s) for another plugin and return serializable image data.
+
+        This method deliberately does not call event.send(). Existing chat commands
+        and LLM tools keep their original "generate and send" behavior.
+        """
+        self._refresh_from_native_config_if_changed()
+        prompt = str(prompt or "").strip()
+        raw_refs = self._as_plugin_image_refs(refs)
+        generation_mode = self._plugin_generation_mode(mode)
+        if not prompt and not raw_refs and generation_mode != "selfie":
+            return {"success": False, "message": "缺少 prompt 或 refs。", "images": []}
+
+        count = self._normalize_count(count)
+        if event is not None:
+            permission_error = self._permission_denied_message(event)
+            if permission_error:
+                return {"success": False, "message": permission_error, "images": []}
+            quota_error = self._image_quota_error_message(event, count)
+            if quota_error:
+                return {"success": False, "message": quota_error, "images": []}
+
+        if generation_mode == "selfie":
+            generation = await self._run_selfie_generation(
+                event,
+                prompt,
+                count,
+                aspect_ratio=aspect_ratio,
+                size=size,
+                extra_params=extra_params,
+                refs=raw_refs,
+            )
+        else:
+            generation = await self._run_text2img_generation(
+                event,
+                prompt or "根据参考图生成一张自然、清晰、符合原图语义的图片。",
+                count,
+                aspect_ratio=aspect_ratio,
+                size=size,
+                extra_params=extra_params,
+                refs=raw_refs,
+            )
+
+        response, valid_results = self._plugin_generation_response(generation)
+        if not response.get("success"):
+            return response
+
+        if event is not None and record_usage:
+            self._record_generated_images(event, len(valid_results))
+        return response
+
     async def _send_generated_images(
         self,
         event: AstrMessageEvent,
@@ -2333,6 +2699,8 @@ class OmniDrawPlugin(Star):
         aspect_ratio: str = "",
         size: str = "",
         extra_params: str = "",
+        return_result: bool = False,
+        refs: str = "",
     ) -> str:
         """
         以此 AI 助理的固定人设拍摄自拍。
@@ -2342,41 +2710,40 @@ class OmniDrawPlugin(Star):
             aspect_ratio (string): 宽高比例，例如 1:1、3:4、9:16、16:9。
             size (string): 分辨率或尺寸参数，例如 1024x1024。
             extra_params (string): 附加模型参数透传，格式为 --key value，可同时传多个。
+            return_result (bool): 仅供其他插件显式调用时使用。为 true 时不自动下发图片，而是返回 JSON 图片结果。
+            refs (string): 仅在 return_result 为 true 时使用。自拍参考图 URL、本地路径或 data URL；多个参考图可用换行分隔，也可传 JSON 数组字符串。
         """
         permission_error = self._permission_denied_message(event)
         if permission_error:
             return permission_error
 
         try:
+            if self._plugin_bool(return_result, default=False):
+                result = await self.generate_images_for_plugin(
+                    prompt=action,
+                    count=count,
+                    aspect_ratio=aspect_ratio,
+                    size=size,
+                    extra_params=extra_params,
+                    refs=refs or self._get_event_images(event),
+                    mode="selfie",
+                    event=event,
+                    record_usage=True,
+                )
+                return json.dumps(result, ensure_ascii=False)
             count = self._normalize_count(count)
             quota_error = self._image_quota_error_message(event, count)
             if quota_error:
                 return quota_error
-            async with aiohttp.ClientSession() as session:
-                optimized_actions = await self.prompt_optimizer.optimize(action or "看着镜头微笑", count, session=session)
-                raw_refs = self._get_event_images(event)
-                target_refs = raw_refs if raw_refs else self.plugin_config.persona_ref_images
-                safe_refs = await self._process_and_save_images(target_refs, session=session)
-                extra_param_kwargs = self._parse_extra_params(extra_params)
-
-                chain_to_use = "selfie" if self.plugin_config.chains.get("selfie") else "text2img"
-                chain_manager = ChainManager(self.plugin_config, session)
-                tasks = []
-                for optimized_action in optimized_actions:
-                    final_prompt, kwargs = self.persona_manager.build_persona_prompt(optimized_action)
-                    if safe_refs:
-                        kwargs["user_refs"] = safe_refs
-                        if not raw_refs:
-                            kwargs.pop("persona_ref", None)
-                    if aspect_ratio:
-                        kwargs["aspect_ratio"] = aspect_ratio
-                    if size:
-                        kwargs["size"] = size
-                    kwargs.update(extra_param_kwargs)
-                    tasks.append(chain_manager.run_chain_with_metadata(chain_to_use, final_prompt, **kwargs))
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            valid_results = [result for result in results if self._get_image_result_url(result)]
+            generation = await self._run_selfie_generation(
+                event,
+                action,
+                count,
+                aspect_ratio=aspect_ratio,
+                size=size,
+                extra_params=extra_params,
+            )
+            valid_results = [result for result in generation["results"] if self._get_image_result_url(result)]
             if not valid_results:
                 raise RuntimeError("所有绘图节点请求失败")
             sent = await self._send_generated_images(event, valid_results)
@@ -2384,6 +2751,13 @@ class OmniDrawPlugin(Star):
             return f"系统提示：已成功生成并下发了 {sent} 张图。"
         except Exception as exc:
             logger.error(f"[OmniDraw] LLM 自拍工具失败: {exc}", exc_info=True)
+            if self._plugin_bool(return_result, default=False):
+                return json.dumps({
+                    "success": False,
+                    "message": f"画图失败 ({self._safe_plugin_error_message(exc)})。",
+                    "images": [],
+                    "mode": "selfie",
+                }, ensure_ascii=False)
             return f"系统提示：画图失败 ({exc})。"
 
     @llm_tool(name="generate_image")
@@ -2395,6 +2769,8 @@ class OmniDrawPlugin(Star):
         aspect_ratio: str = "",
         size: str = "",
         extra_params: str = "",
+        return_result: bool = False,
+        refs: str = "",
     ) -> str:
         """
         AI 画图工具。当用户提出明确的画面要求你画出来时调用此工具。
@@ -2404,35 +2780,39 @@ class OmniDrawPlugin(Star):
             aspect_ratio (string): 宽高比例，例如 1:1、3:4、9:16、16:9。
             size (string): 分辨率或尺寸参数，例如 1024x1024。
             extra_params (string): 其他模型参数透传，格式为 --key value，可同时传多个。
+            return_result (bool): 仅供其他插件显式调用时使用。为 true 时不自动下发图片，而是返回 JSON 图片结果。
+            refs (string): 仅在 return_result 为 true 时使用。参考图 URL、本地路径或 data URL；多个参考图可用换行分隔，也可传 JSON 数组字符串。
         """
         permission_error = self._permission_denied_message(event)
         if permission_error:
             return permission_error
 
         try:
+            if self._plugin_bool(return_result, default=False):
+                result = await self.generate_images_for_plugin(
+                    prompt=prompt,
+                    count=count,
+                    aspect_ratio=aspect_ratio,
+                    size=size,
+                    extra_params=extra_params,
+                    refs=refs or self._get_event_images(event),
+                    event=event,
+                    record_usage=True,
+                )
+                return json.dumps(result, ensure_ascii=False)
             count = self._normalize_count(count)
             quota_error = self._image_quota_error_message(event, count)
             if quota_error:
                 return quota_error
-            async with aiohttp.ClientSession() as session:
-                optimized_actions = await self.prompt_optimizer.optimize(prompt, count, session=session)
-                safe_refs = await self._process_and_save_images(self._get_event_images(event), session=session)
-
-                kwargs = {"user_refs": safe_refs} if safe_refs else {}
-                if aspect_ratio:
-                    kwargs["aspect_ratio"] = aspect_ratio
-                if size:
-                    kwargs["size"] = size
-                kwargs.update(self._parse_extra_params(extra_params))
-
-                chain_manager = ChainManager(self.plugin_config, session)
-                tasks = [
-                    chain_manager.run_chain_with_metadata("text2img", optimized_action, **kwargs)
-                    for optimized_action in optimized_actions
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            valid_results = [result for result in results if self._get_image_result_url(result)]
+            generation = await self._run_text2img_generation(
+                event,
+                prompt,
+                count,
+                aspect_ratio=aspect_ratio,
+                size=size,
+                extra_params=extra_params,
+            )
+            valid_results = [result for result in generation["results"] if self._get_image_result_url(result)]
             if not valid_results:
                 raise RuntimeError("所有绘图节点请求失败")
             sent = await self._send_generated_images(event, valid_results)
@@ -2440,6 +2820,13 @@ class OmniDrawPlugin(Star):
             return f"系统提示：已成功下发 {sent} 张图。"
         except Exception as exc:
             logger.error(f"[OmniDraw] LLM 画图工具失败: {exc}", exc_info=True)
+            if self._plugin_bool(return_result, default=False):
+                return json.dumps({
+                    "success": False,
+                    "message": f"画图失败 ({self._safe_plugin_error_message(exc)})。",
+                    "images": [],
+                    "mode": "text2img",
+                }, ensure_ascii=False)
             return f"系统提示：画图失败 ({exc})。"
 
     @llm_tool(name="generate_video")

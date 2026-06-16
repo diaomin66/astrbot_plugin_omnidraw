@@ -522,6 +522,370 @@ class ImageSuccessComponentsTest(unittest.TestCase):
         self.assertEqual(hidden, [{"type": "image", "url": "https://cdn.example.com/out.png"}])
 
 
+class FakeClientSession:
+    def __init__(self):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class PluginImageReturnTest(unittest.IsolatedAsyncioTestCase):
+    def _plugin(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin.data_dir = str(PLUGIN_DIR / ".pytest_cache" / "plugin_return")
+        plugin.plugin_config = types.SimpleNamespace(max_batch_count=4)
+        plugin.prompt_optimizer = types.SimpleNamespace(
+            optimize=lambda prompt, count, session=None: self._optimize(prompt, count)
+        )
+        plugin.persona_manager = types.SimpleNamespace(
+            build_persona_prompt=lambda action: (f"persona base, {action}", {"persona_ref": "persona-default.png"})
+        )
+        plugin._refresh_from_native_config_if_changed = lambda: None
+        plugin._process_and_save_images = self._process_refs
+        plugin._parse_extra_params = lambda extra: {"model": "override-model"} if extra else {}
+        plugin._prune_cache_if_needed = lambda *args, **kwargs: None
+        plugin._recorded_count = 0
+        plugin._record_generated_images = lambda event, count=1: setattr(plugin, "_recorded_count", count)
+        plugin._permission_denied_message = lambda event: ""
+        plugin._image_quota_error_message = lambda event, count=1: ""
+        plugin._get_event_images = lambda event: []
+        return plugin
+
+    async def _optimize(self, prompt, count):
+        return [f"{prompt} #{index}" for index in range(1, count + 1)]
+
+    async def _process_refs(self, refs, session=None):
+        return [f"safe:{ref}" for ref in refs]
+
+    async def test_generate_images_for_plugin_returns_images_without_sending(self):
+        plugin = self._plugin()
+        calls = []
+        original_client_session = main_module.aiohttp.ClientSession
+        original_chain_manager = main_module.ChainManager
+
+        class FakeChainManager:
+            def __init__(self, config, session):
+                self.config = config
+                self.session = session
+
+            async def run_chain_with_metadata(self, chain_name, prompt, **kwargs):
+                calls.append((chain_name, prompt, kwargs))
+                return ChainRunResult(
+                    image_url=f"https://cdn.example.com/{len(calls)}.png",
+                    provider_id="node_1",
+                    model=kwargs.get("model", "model_a"),
+                    elapsed_seconds=1.5,
+                )
+
+        main_module.aiohttp.ClientSession = FakeClientSession
+        main_module.ChainManager = FakeChainManager
+        try:
+            result = await plugin.generate_images_for_plugin(
+                prompt="draw a cat",
+                count=2,
+                size="1024x1024",
+                extra_params="--model override-model",
+                refs=["https://example.com/ref.png"],
+            )
+        finally:
+            main_module.aiohttp.ClientSession = original_client_session
+            main_module.ChainManager = original_chain_manager
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["ref_count"], 1)
+        self.assertEqual(result["processed_ref_count"], 1)
+        self.assertEqual([image["url"] for image in result["images"]], [
+            "https://cdn.example.com/1.png",
+            "https://cdn.example.com/2.png",
+        ])
+        self.assertEqual(result["images"][0]["provider_id"], "node_1")
+        self.assertEqual(result["images"][0]["model"], "override-model")
+        self.assertEqual(calls[0][2]["user_refs"], ["safe:https://example.com/ref.png"])
+        self.assertEqual(calls[0][2]["size"], "1024x1024")
+        self.assertEqual(calls[0][0], "text2img")
+
+    async def test_generate_images_for_plugin_supports_selfie_mode(self):
+        plugin = self._plugin()
+        plugin.plugin_config.persona_ref_images = ["persona-ref.png"]
+        plugin.plugin_config.chains = {"selfie": ["selfie_node_1"]}
+        calls = []
+        original_client_session = main_module.aiohttp.ClientSession
+        original_chain_manager = main_module.ChainManager
+
+        class FakeChainManager:
+            def __init__(self, config, session):
+                pass
+
+            async def run_chain_with_metadata(self, chain_name, prompt, **kwargs):
+                calls.append((chain_name, prompt, kwargs))
+                return ChainRunResult(
+                    image_url="https://cdn.example.com/selfie.png",
+                    provider_id="selfie_node_1",
+                    model="selfie-model",
+                    elapsed_seconds=2.0,
+                )
+
+        main_module.aiohttp.ClientSession = FakeClientSession
+        main_module.ChainManager = FakeChainManager
+        try:
+            result = await plugin.generate_images_for_plugin(
+                prompt="wearing a red hoodie",
+                count=1,
+                refs=[],
+                mode="selfie",
+            )
+        finally:
+            main_module.aiohttp.ClientSession = original_client_session
+            main_module.ChainManager = original_chain_manager
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["mode"], "selfie")
+        self.assertEqual(result["chain"], "selfie")
+        self.assertEqual(result["processed_ref_count"], 1)
+        self.assertEqual(calls[0][0], "selfie")
+        self.assertIn("persona base, wearing a red hoodie #1", calls[0][1])
+        self.assertEqual(calls[0][2]["user_refs"], ["safe:persona-ref.png"])
+        self.assertNotIn("persona_ref", calls[0][2])
+
+    async def test_generate_image_tool_can_return_json_when_requested(self):
+        plugin = self._plugin()
+        plugin.generate_images_for_plugin = self._fake_generate_images_for_plugin
+
+        payload = await plugin.tool_generate_image(
+            event=object(),
+            prompt="draw a dog",
+            count=1,
+            return_result=True,
+            refs="https://example.com/ref.png",
+        )
+
+        data = json.loads(payload)
+        self.assertTrue(data["success"])
+        self.assertEqual(data["images"][0]["image_url"], "https://cdn.example.com/out.png")
+
+    async def test_generate_image_tool_returns_json_error_when_return_result_fails(self):
+        plugin = self._plugin()
+
+        async def fail_generate_images_for_plugin(**kwargs):
+            raise RuntimeError("api_key=sk-secret1234567890 data:image/png;base64," + _long_b64())
+
+        plugin.generate_images_for_plugin = fail_generate_images_for_plugin
+
+        payload = await plugin.tool_generate_image(
+            event=object(),
+            prompt="draw a dog",
+            return_result=True,
+        )
+
+        data = json.loads(payload)
+        self.assertFalse(data["success"])
+        self.assertEqual(data["mode"], "text2img")
+        self.assertIn("api_key=<redacted>", data["message"])
+        self.assertNotIn("sk-secret", data["message"])
+        self.assertNotIn("data:image/png;base64", data["message"])
+
+    async def _fake_generate_images_for_plugin(self, **kwargs):
+        self.assertEqual(kwargs["prompt"], "draw a dog")
+        self.assertIs(kwargs["record_usage"], True)
+        self.assertEqual(kwargs["refs"], "https://example.com/ref.png")
+        self.assertEqual(kwargs.get("mode", ""), "")
+        return {
+            "success": True,
+            "message": "ok",
+            "images": [{"image_url": "https://cdn.example.com/out.png"}],
+        }
+
+    async def test_generate_selfie_tool_can_return_json_when_requested(self):
+        plugin = self._plugin()
+        plugin.generate_images_for_plugin = self._fake_generate_selfie_for_plugin
+
+        payload = await plugin.tool_generate_selfie(
+            event=object(),
+            action="look at camera",
+            count=1,
+            return_result=True,
+            refs="https://example.com/selfie-ref.png",
+        )
+
+        data = json.loads(payload)
+        self.assertTrue(data["success"])
+        self.assertEqual(data["mode"], "selfie")
+        self.assertEqual(data["images"][0]["image_url"], "https://cdn.example.com/selfie-out.png")
+
+    async def test_generate_selfie_tool_returns_json_error_when_return_result_fails(self):
+        plugin = self._plugin()
+
+        async def fail_generate_images_for_plugin(**kwargs):
+            raise RuntimeError("Bearer secret-token-value-1234567890")
+
+        plugin.generate_images_for_plugin = fail_generate_images_for_plugin
+
+        payload = await plugin.tool_generate_selfie(
+            event=object(),
+            action="look at camera",
+            return_result=True,
+        )
+
+        data = json.loads(payload)
+        self.assertFalse(data["success"])
+        self.assertEqual(data["mode"], "selfie")
+        self.assertIn("Bearer <redacted>", data["message"])
+        self.assertNotIn("secret-token", data["message"])
+
+    async def _fake_generate_selfie_for_plugin(self, **kwargs):
+        self.assertEqual(kwargs["prompt"], "look at camera")
+        self.assertEqual(kwargs["mode"], "selfie")
+        self.assertIs(kwargs["record_usage"], True)
+        self.assertEqual(kwargs["refs"], "https://example.com/selfie-ref.png")
+        return {
+            "success": True,
+            "message": "ok",
+            "mode": "selfie",
+            "images": [{"image_url": "https://cdn.example.com/selfie-out.png"}],
+        }
+
+    async def test_existing_generate_selfie_tool_still_sends_images_through_shared_generation(self):
+        plugin = self._plugin()
+        plugin.plugin_config.persona_ref_images = ["persona-ref.png"]
+        plugin.plugin_config.chains = {"selfie": ["selfie_node_1"]}
+        send_calls = []
+        original_client_session = main_module.aiohttp.ClientSession
+        original_chain_manager = main_module.ChainManager
+
+        class FakeChainManager:
+            def __init__(self, config, session):
+                pass
+
+            async def run_chain_with_metadata(self, chain_name, prompt, **kwargs):
+                return ChainRunResult(
+                    image_url="https://cdn.example.com/old-selfie.png",
+                    provider_id="selfie_node_1",
+                    model="selfie-model",
+                    elapsed_seconds=1.0,
+                )
+
+        async def fake_send_generated_images(event, results, *args, **kwargs):
+            send_calls.extend(results)
+            return len(results)
+
+        main_module.aiohttp.ClientSession = FakeClientSession
+        main_module.ChainManager = FakeChainManager
+        plugin._send_generated_images = fake_send_generated_images
+        try:
+            message = await plugin.tool_generate_selfie(object(), "look at camera", count=1)
+        finally:
+            main_module.aiohttp.ClientSession = original_client_session
+            main_module.ChainManager = original_chain_manager
+
+        self.assertIn("已成功生成并下发了 1 张图", message)
+        self.assertEqual(len(send_calls), 1)
+        self.assertEqual(send_calls[0].image_url, "https://cdn.example.com/old-selfie.png")
+        self.assertEqual(plugin._recorded_count, 1)
+
+    async def test_existing_generate_image_tool_still_sends_images(self):
+        plugin = self._plugin()
+        send_calls = []
+        original_client_session = main_module.aiohttp.ClientSession
+        original_chain_manager = main_module.ChainManager
+
+        class FakeChainManager:
+            def __init__(self, config, session):
+                pass
+
+            async def run_chain_with_metadata(self, chain_name, prompt, **kwargs):
+                return ChainRunResult(
+                    image_url="https://cdn.example.com/old-tool.png",
+                    provider_id="node_1",
+                    model="model_a",
+                    elapsed_seconds=1.0,
+                )
+
+        async def fake_send_generated_images(event, results, *args, **kwargs):
+            send_calls.extend(results)
+            return len(results)
+
+        main_module.aiohttp.ClientSession = FakeClientSession
+        main_module.ChainManager = FakeChainManager
+        plugin._send_generated_images = fake_send_generated_images
+        try:
+            message = await plugin.tool_generate_image(object(), "draw a cat", count=1)
+        finally:
+            main_module.aiohttp.ClientSession = original_client_session
+            main_module.ChainManager = original_chain_manager
+
+        self.assertIn("已成功下发 1 张图", message)
+        self.assertEqual(len(send_calls), 1)
+        self.assertEqual(send_calls[0].image_url, "https://cdn.example.com/old-tool.png")
+        self.assertEqual(plugin._recorded_count, 1)
+
+    def test_plugin_refs_accept_json_object_and_dedupe(self):
+        plugin = self._plugin()
+        refs = plugin._as_plugin_image_refs(json.dumps({
+            "url": "https://example.com/ref.png",
+        }))
+
+        self.assertEqual(refs, ["https://example.com/ref.png"])
+        self.assertEqual(
+            plugin._as_plugin_image_refs([
+                {"image_url": "https://example.com/ref.png"},
+                "https://example.com/ref.png",
+                {"path": "local.png"},
+            ]),
+            ["https://example.com/ref.png", "local.png"],
+        )
+
+    def test_plugin_prompt_normalization_preserves_requested_count(self):
+        plugin = self._plugin()
+
+        self.assertEqual(
+            plugin._normalize_plugin_prompts(["optimized"], "fallback", 3),
+            ["optimized", "fallback", "fallback"],
+        )
+        self.assertEqual(
+            plugin._normalize_plugin_prompts(["one", "two", "three"], "fallback", 2),
+            ["one", "two"],
+        )
+
+    def test_plugin_response_keeps_results_when_prompt_list_is_short_and_redacts_errors(self):
+        plugin = self._plugin()
+        response, valid_results = plugin._plugin_generation_response({
+            "prompts": ["first prompt"],
+            "results": [
+                ChainRunResult(
+                    image_url="https://cdn.example.com/one.png",
+                    provider_id="node_1",
+                    model="model-a",
+                    elapsed_seconds=1.0,
+                ),
+                ChainRunResult(
+                    image_url="https://cdn.example.com/two.png",
+                    provider_id="node_1",
+                    model="model-a",
+                    elapsed_seconds=1.0,
+                ),
+                RuntimeError("authorization=Bearer-secret-token-1234567890"),
+            ],
+            "requested_count": 3,
+            "raw_refs": [],
+            "safe_refs": [],
+            "mode": "text2img",
+            "chain": "text2img",
+        })
+
+        self.assertTrue(response["success"])
+        self.assertEqual(response["count"], 2)
+        self.assertEqual(len(valid_results), 2)
+        self.assertEqual(response["images"][0]["prompt"], "first prompt")
+        self.assertEqual(response["images"][1]["prompt"], "")
+        self.assertIn("authorization=<redacted>", response["errors"][0])
+        self.assertNotIn("Bearer-secret", response["errors"][0])
+
+
 class FastPresetListTest(unittest.TestCase):
     def _plugin(self, presets):
         plugin = object.__new__(OmniDrawPlugin)

@@ -152,9 +152,9 @@ OUTPUT FORMAT:
         payload = {
             "model": self.config.optimizer_model or provider.model,
             "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": raw_action}],
-            "max_tokens": 4000 if count > 1 else 2500, 
+            "max_tokens": 4000 if count > 1 else 2500,
             "temperature": 0.8,
-            "response_format": {"type": "json_object"} 
+            "response_format": {"type": "json_object"}
         }
 
         session_obj = session
