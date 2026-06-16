@@ -84,6 +84,7 @@ class OpenAIProvider(BaseProvider):
                 async with self.session.post(url, json=payload, headers=headers, timeout=timeout_obj) as response:
                     return await self._parse_response(response, base_url)
 
+            # 🔄 尝试 /images/edits 端点（multipart form-data）
             data = aiohttp.FormData()
             for idx, ref_image in enumerate(ref_images, start=1):
                 try:
@@ -107,8 +108,62 @@ class OpenAIProvider(BaseProvider):
 
             headers = {"Authorization": "Bearer " + current_key}
             timeout_obj = aiohttp.ClientTimeout(total=self.config.timeout)
-            async with self.session.post(url, data=data, headers=headers, timeout=timeout_obj) as response:
-                return await self._parse_response(response, base_url)
+
+            try:
+                async with self.session.post(url, data=data, headers=headers, timeout=timeout_obj) as response:
+                    return await self._parse_response(response, base_url)
+            except RuntimeError as e:
+                # 🔧 如果 /images/edits 返回 404，回退到 /images/generations + JSON 格式
+                if "HTTP 404" in str(e) or "NotFoundError" in str(e) or "Not Found" in str(e):
+                    logger.warning(f"⚠️ /images/edits 端点不可用 (404)，自动回退到 /images/generations")
+                    fallback_url = build_image_generations_endpoint(base_url)
+                    logger.info(f"🔄 回退到: {fallback_url}")
+
+                    # 构建 JSON payload，尝试两种格式：
+                    # 1. extra_body.image 数组格式（agnes-image 等）
+                    # 2. 顶层 image/image2/image3 字段格式（通用）
+
+                    # 收集参考图 URL（优先使用原始 URL，避免 base64 膨胀）
+                    image_urls = []
+                    for idx, ref_image in enumerate(ref_images[:3], start=1):
+                        # 如果是 HTTP/HTTPS URL，直接使用
+                        if ref_image.startswith("http://") or ref_image.startswith("https://"):
+                            image_urls.append(ref_image)
+                        else:
+                            # 本地文件或 data URL，转换为 base64
+                            try:
+                                image_value = await self._encode_image_to_data_url(ref_image)
+                                image_urls.append(image_value)
+                            except Exception as e:
+                                raise RuntimeError(f"读取第 {idx} 张参考图数据失败: {e}")
+
+                    payload = {
+                        "model": self.config.model,
+                        "prompt": prompt,
+                        "n": 1,
+                        "extra_body": {
+                            "image": image_urls,  # agnes-image 格式：数组
+                            "response_format": "b64_json"
+                        }
+                    }
+
+                    # 同时在顶层也加上 image/image2/image3，兼容其他 API
+                    for idx, img_url in enumerate(image_urls[:3], start=1):
+                        payload["image" if idx == 1 else f"image{idx}"] = img_url
+
+                    # 合并高级参数
+                    payload.update(api_kwargs)
+
+                    log_payload = {k: v for k, v in payload.items() if k not in ["image", "image2", "image3", "extra_body"]}
+                    logger.info(f"📤 [回退通道] 附带 {len(image_urls)} 张参考图的请求体摘要: {summarize_payload_json_for_log(log_payload)}")
+
+                    headers = {"Content-Type": "application/json", "Authorization": "Bearer " + current_key}
+                    timeout_obj = aiohttp.ClientTimeout(total=self.config.timeout)
+                    async with self.session.post(fallback_url, json=payload, headers=headers, timeout=timeout_obj) as response:
+                        return await self._parse_response(response, base_url)
+                else:
+                    # 其他错误直接抛出
+                    raise
 
         else:
             url = build_image_generations_endpoint(base_url)
