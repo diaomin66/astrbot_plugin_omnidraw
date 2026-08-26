@@ -622,6 +622,19 @@ const routeDefs = {
     }
 };
 
+function removeNodeFromRouteStrings(nodeId, routeNames) {
+    const removedId = String(nodeId || "").trim();
+    if (!removedId) return;
+    routeNames.forEach((routeName) => {
+        const def = routeDefs[routeName];
+        if (!def) return;
+        writeRouteChain(
+            routeName,
+            splitChain(state.router_config[def.stateKey]).filter((currentId) => currentId !== removedId)
+        );
+    });
+}
+
 function routeChain(routeName) {
     const def = routeDefs[routeName];
     if (!def) return [];
@@ -1284,7 +1297,13 @@ function setupEventDelegation() {
             animateAdd("providers-container");
             setDirty();
         }
-        if (act === "del-provider") animateDel("providers-container", state.providers, idx, renderProviders, renderSelectors);
+        if (act === "del-provider") {
+            const removedId = state.providers[idx]?.id;
+            animateDel("providers-container", state.providers, idx, renderProviders, () => {
+                removeNodeFromRouteStrings(removedId, ["text2img", "selfie"]);
+                renderSelectors();
+            });
+        }
         if (act === "add-video-provider") {
             state.video_providers.push({ id: `video_node_${state.video_providers.length + 1}`, api_type: "async_task", base_url: "", model: "", available_models: [], api_keys: "", timeout: 300, default_size: "" });
             renderVideoProviders();
@@ -1292,7 +1311,13 @@ function setupEventDelegation() {
             animateAdd("video-providers-container");
             setDirty();
         }
-        if (act === "del-video-provider") animateDel("video-providers-container", state.video_providers, idx, renderVideoProviders, renderSelectors);
+        if (act === "del-video-provider") {
+            const removedId = state.video_providers[idx]?.id;
+            animateDel("video-providers-container", state.video_providers, idx, renderVideoProviders, () => {
+                removeNodeFromRouteStrings(removedId, ["video"]);
+                renderSelectors();
+            });
+        }
         if (act === "del-persona-img") {
             animateDel("persona-upload-container", getActivePersona().persona_ref_image, idx, () => {
                 syncActivePersonaMirror();
