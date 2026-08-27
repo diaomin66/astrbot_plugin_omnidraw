@@ -18,6 +18,7 @@ class APIType:
     OPENAI_CHAT = "openai_chat"  # 新增 Chat 解析出图类型
     GEMINI_OFFICIAL = "gemini_official"
     CUSTOM_ENDPOINT = "custom_endpoint"
+    STABLE_DIFFUSION_WEBUI = "stable_diffusion_webui"
 
 class MessageEmoji:
     """消息表情符号"""

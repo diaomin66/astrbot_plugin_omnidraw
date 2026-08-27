@@ -128,6 +128,7 @@ custom_endpoint_module = importlib.import_module(f"{PACKAGE_NAME}.providers.cust
 gemini_official_module = importlib.import_module(f"{PACKAGE_NAME}.providers.gemini_official_impl")
 openai_impl_module = importlib.import_module(f"{PACKAGE_NAME}.providers.openai_impl")
 openai_chat_module = importlib.import_module(f"{PACKAGE_NAME}.providers.openai_chat_impl")
+stable_diffusion_webui_module = importlib.import_module(f"{PACKAGE_NAME}.providers.stable_diffusion_webui_impl")
 provider_factory_module = importlib.import_module(f"{PACKAGE_NAME}.providers")
 chain_manager_module = importlib.import_module(f"{PACKAGE_NAME}.core.chain_manager")
 video_manager_module = importlib.import_module(f"{PACKAGE_NAME}.core.video_manager")
@@ -152,6 +153,7 @@ CustomEndpointProvider = custom_endpoint_module.CustomEndpointProvider
 GeminiOfficialProvider = gemini_official_module.GeminiOfficialProvider
 OpenAIProvider = openai_impl_module.OpenAIProvider
 OpenAIChatProvider = openai_chat_module.OpenAIChatProvider
+StableDiffusionWebUIProvider = stable_diffusion_webui_module.StableDiffusionWebUIProvider
 
 
 def _long_b64() -> str:
@@ -212,6 +214,47 @@ class CustomEndpointHelpersTest(unittest.TestCase):
         self.assertEqual(_normalize_api_type("async_task", is_video=True), "async_task")
         self.assertEqual(_normalize_api_type("异步轮询", is_video=True), "async_task")
         self.assertEqual(_normalize_api_type("openai_sync", is_video=True), "openai_sync")
+
+    def test_stable_diffusion_webui_api_type_is_preserved(self):
+        self.assertEqual(_normalize_api_type("stable_diffusion_webui", is_video=False), "stable_diffusion_webui")
+        self.assertEqual(_normalize_api_type("Stable Diffusion WebUI", is_video=False), "stable_diffusion_webui")
+
+    def test_provider_factory_creates_stable_diffusion_webui_provider(self):
+        config = ProviderConfig(
+            id="sd_node",
+            api_type="stable_diffusion_webui",
+            base_url="http://127.0.0.1:7860",
+            api_keys=[],
+            model="",
+            timeout=120.0,
+        )
+
+        provider = provider_factory_module.create_provider(config, session=object())
+
+        self.assertIsInstance(provider, StableDiffusionWebUIProvider)
+
+    def test_stable_diffusion_webui_defaults_are_normalized(self):
+        config = PluginConfig.from_dict(
+            {
+                "providers": [
+                    {
+                        "id": "sd",
+                        "api_type": "stable_diffusion_webui",
+                        "base_url": "http://127.0.0.1:7860",
+                        "sd_steps": "30",
+                        "sd_cfg_scale": "8.5",
+                        "sd_sampler_name": "  DPM++ 2M Karras ",
+                    }
+                ]
+            },
+            str(PLUGIN_DIR),
+        )
+
+        provider = config.providers[0]
+
+        self.assertEqual(provider.sd_steps, 30)
+        self.assertEqual(provider.sd_cfg_scale, 8.5)
+        self.assertEqual(provider.sd_sampler_name, "DPM++ 2M Karras")
 
     def test_extracts_gemini_inline_data_response(self):
         endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent"
@@ -1617,6 +1660,43 @@ class ChainManagerMetadataTest(unittest.IsolatedAsyncioTestCase):
         finally:
             chain_manager_module.create_provider = original_create_provider
 
+    async def test_stable_diffusion_webui_chain_allows_empty_model_and_api_key(self):
+        config = PluginConfig.from_dict(
+            {
+                "providers": [
+                    {
+                        "id": "sd",
+                        "api_type": "stable_diffusion_webui",
+                        "base_url": "http://127.0.0.1:7860",
+                        "api_keys": "",
+                        "model": "",
+                    }
+                ],
+                "router_config": {"chain_text2img": "sd"},
+            },
+            str(PLUGIN_DIR),
+        )
+        calls = []
+
+        class FakeProvider:
+            async def generate_image(self, prompt, **kwargs):
+                calls.append((prompt, kwargs))
+                return "data:image/png;base64," + _long_b64()
+
+        original_create_provider = chain_manager_module.create_provider
+        chain_manager_module.create_provider = lambda provider_config, session: FakeProvider()
+        try:
+            result = await ChainManager(config, session=object()).run_chain_with_metadata(
+                "text2img",
+                "draw a cat",
+            )
+
+            self.assertEqual(result.provider_id, "sd")
+            self.assertEqual(result.model, "")
+            self.assertEqual(calls, [("draw a cat", {})])
+        finally:
+            chain_manager_module.create_provider = original_create_provider
+
 
 class VideoSuccessMetadataTest(unittest.TestCase):
     def test_success_text_respects_metadata_toggles(self):
@@ -1840,6 +1920,83 @@ class GeminiOfficialProviderTest(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(ValueError, "未返回图片数据"):
             await provider.generate_image("draw a cat")
+
+
+class StableDiffusionWebUIProviderTest(unittest.IsolatedAsyncioTestCase):
+    def _provider(self, *, api_keys=None, model=""):
+        config = ProviderConfig(
+            id="sd_node",
+            api_type="stable_diffusion_webui",
+            base_url="http://127.0.0.1:7860",
+            api_keys=api_keys or [],
+            model=model,
+            timeout=120.0,
+            default_size="512x768",
+        )
+        response = {"images": [base64.b64encode(b"generated-image").decode("ascii")]}
+        session = FakeSession(FakeResponse(response))
+        return StableDiffusionWebUIProvider(config, session), session
+
+    async def test_txt2img_posts_webui_payload_and_returns_data_url(self):
+        provider, session = self._provider(model="checkpoint.safetensors")
+
+        result = await provider.generate_image(
+            "draw a cat",
+            steps="20",
+            cfg_scale="7.5",
+            sampler_name="Euler a",
+        )
+
+        self.assertEqual(result, "data:image/png;base64," + base64.b64encode(b"generated-image").decode("ascii"))
+        request = session.posts[0]
+        self.assertEqual(request["url"], "http://127.0.0.1:7860/sdapi/v1/txt2img")
+        self.assertEqual(request["json"]["prompt"], "draw a cat")
+        self.assertEqual(request["json"]["width"], 512)
+        self.assertEqual(request["json"]["height"], 768)
+        self.assertEqual(request["json"]["steps"], 20)
+        self.assertEqual(request["json"]["cfg_scale"], 7.5)
+        self.assertEqual(request["json"]["sampler_name"], "Euler a")
+        self.assertEqual(
+            request["json"]["override_settings"]["sd_model_checkpoint"],
+            "checkpoint.safetensors",
+        )
+        self.assertIs(request["json"]["override_settings_restore_afterwards"], True)
+        self.assertNotIn("Authorization", request["headers"])
+
+    async def test_request_parameters_override_node_defaults(self):
+        provider, session = self._provider()
+
+        await provider.generate_image(
+            "draw a cat",
+            steps="35",
+            cfg_scale="9",
+            sampler_name="DPM++ SDE",
+        )
+
+        payload = session.posts[0]["json"]
+        self.assertEqual(payload["steps"], 35)
+        self.assertEqual(payload["cfg_scale"], 9)
+        self.assertEqual(payload["sampler_name"], "DPM++ SDE")
+
+    async def test_img2img_uses_plain_base64_reference_and_basic_auth(self):
+        provider, session = self._provider(api_keys=["user:password"])
+        reference_b64 = base64.b64encode(b"reference-image").decode("ascii")
+
+        await provider.generate_image(
+            "edit a cat",
+            user_refs=["data:image/jpeg;base64," + reference_b64],
+            size="640x480",
+            denoising_strength="0.55",
+        )
+
+        request = session.posts[0]
+        self.assertEqual(request["url"], "http://127.0.0.1:7860/sdapi/v1/img2img")
+        self.assertEqual(request["json"]["init_images"], [reference_b64])
+        self.assertEqual(request["json"]["width"], 640)
+        self.assertEqual(request["json"]["height"], 480)
+        self.assertEqual(request["json"]["denoising_strength"], 0.55)
+        expected_auth = base64.b64encode(b"user:password").decode("ascii")
+        self.assertEqual(request["headers"]["Authorization"], f"Basic {expected_auth}")
 
 
 class CustomEndpointProviderTest(unittest.IsolatedAsyncioTestCase):

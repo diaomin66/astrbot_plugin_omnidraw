@@ -34,6 +34,9 @@ class ProviderConfig:
     timeout: float
     default_size: str = ""
     available_models: List[str] = field(default_factory=list)
+    sd_steps: int = 20
+    sd_cfg_scale: float = 7.0
+    sd_sampler_name: str = "Euler a"
 
     @property
     def has_api_key(self) -> bool:
@@ -350,6 +353,8 @@ def _normalize_api_type(value: Any, is_video: bool) -> str:
         return "async_task"
     if "gemini" in lowered:
         return APIType.GEMINI_OFFICIAL
+    if "stable_diffusion" in lowered or "stable-diffusion" in lowered or "a1111" in lowered or "webui" in lowered:
+        return APIType.STABLE_DIFFUSION_WEBUI
     if lowered in {"custom_endpoint", "custom"} or "自定义" in raw:
         return APIType.CUSTOM_ENDPOINT
     if "chat" in lowered or "对话" in raw:
@@ -378,6 +383,9 @@ def _build_provider_config(raw_provider: Any, is_video: bool) -> ProviderConfig:
         available_models.insert(0, model)
 
     default_timeout = 300.0 if is_video else 60.0
+    sd_steps = _to_int(raw_provider.get("sd_steps", 20), 20, minimum=1)
+    sd_cfg_scale = _to_float(raw_provider.get("sd_cfg_scale", 7.0), 7.0, minimum=0.0)
+    sd_sampler_name = str(raw_provider.get("sd_sampler_name", "Euler a") or "Euler a").strip() or "Euler a"
     return ProviderConfig(
         id=str(raw_provider.get("id", raw_provider.get("节点ID", ""))).strip(),
         api_type=api_type,
@@ -392,6 +400,9 @@ def _build_provider_config(raw_provider: Any, is_video: bool) -> ProviderConfig:
         timeout=_to_float(raw_provider.get("timeout", raw_provider.get("超时时间(秒)", default_timeout)), default_timeout, 1.0),
         default_size=_normalize_optional_text(raw_provider.get("default_size", raw_provider.get("default_resolution", ""))),
         available_models=available_models,
+        sd_steps=sd_steps,
+        sd_cfg_scale=sd_cfg_scale,
+        sd_sampler_name=sd_sampler_name,
     )
 
 

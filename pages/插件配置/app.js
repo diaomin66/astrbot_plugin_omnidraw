@@ -622,6 +622,19 @@ const routeDefs = {
     }
 };
 
+function removeNodeFromRouteStrings(nodeId, routeNames) {
+    const removedId = String(nodeId || "").trim();
+    if (!removedId) return;
+    routeNames.forEach((routeName) => {
+        const def = routeDefs[routeName];
+        if (!def) return;
+        writeRouteChain(
+            routeName,
+            splitChain(state.router_config[def.stateKey]).filter((currentId) => currentId !== removedId)
+        );
+    });
+}
+
 function routeChain(routeName) {
     const def = routeDefs[routeName];
     if (!def) return [];
@@ -660,7 +673,8 @@ function bounceRoute(routeName) {
 function syncRouteFromHidden(routeName) {
     const def = routeDefs[routeName];
     if (!def) return;
-    const primary = String(byId(def.inputId)?.value || routePrimary(routeName) || def.fallback || "").trim();
+    const configuredChain = splitChain(state.router_config[def.stateKey]);
+    const primary = String(byId(def.inputId)?.value || (configuredChain.length ? configuredChain[0] : "")).trim();
     const backups = state.route_backup_enabled[routeName]
         ? routeBackups(routeName).filter((nodeId) => nodeId !== primary)
         : [];
@@ -715,7 +729,8 @@ function renderSelectors() {
         const container = byId(def.selectorId);
         const hiddenInput = byId(def.inputId);
         if (!container || !hiddenInput) return;
-        const currentVal = routePrimary(routeName);
+        const configuredChain = splitChain(state.router_config[def.stateKey]);
+        const currentVal = configuredChain[0] || "";
         hiddenInput.value = currentVal;
         const sourceList = def.source();
         const html = sourceList.map((node) => {
@@ -862,7 +877,8 @@ function renderProviderCard(p, i, isVideo) {
             ["openai_image", "标准生图"],
             ["openai_chat", "对话透传"],
             ["gemini_official", "Gemini"],
-            ["custom_endpoint", "自定义"]
+            ["custom_endpoint", "自定义"],
+            ["stable_diffusion_webui", "Stable Diffusion WebUI"]
         ];
 
     const modeChips = modes.map(([value, label]) => {
@@ -908,6 +924,20 @@ function renderProviderCard(p, i, isVideo) {
                     <label>默认尺寸</label>
                     <input type="text" class="input-glass" value="${escapeHtml(p.default_size || "")}" placeholder="${isVideo ? "1280x720" : "1024x1024"}" data-sync="${prefix}-size" data-index="${i}">
                 </div>
+                ${!isVideo && p.api_type === "stable_diffusion_webui" ? `
+                <div class="form-group">
+                    <label>SD 采样步数</label>
+                    <input type="number" class="input-glass" value="${escapeHtml(p.sd_steps ?? 20)}" min="1" data-sync="prov-sd-steps" data-index="${i}">
+                </div>
+                <div class="form-group">
+                    <label>SD CFG Scale</label>
+                    <input type="number" class="input-glass" value="${escapeHtml(p.sd_cfg_scale ?? 7)}" min="0" step="0.1" data-sync="prov-sd-cfg" data-index="${i}">
+                </div>
+                <div class="form-group">
+                    <label>SD 采样器</label>
+                    <input type="text" class="input-glass" value="${escapeHtml(p.sd_sampler_name || "Euler a")}" data-sync="prov-sd-sampler" data-index="${i}">
+                </div>
+                ` : ""}
                 <div class="form-group full-width">
                     <label>API Keys</label>
                     <textarea class="input-glass" rows="3" data-sync="${prefix}-keys" data-index="${i}">${escapeHtml(p.api_keys)}</textarea>
@@ -1044,7 +1074,7 @@ function validateConfig() {
         const def = routeDefs[routeName];
         const ids = new Set(def.source().map((node) => String(node.id || "").trim()).filter(Boolean));
         if (!ids.size) return "";
-        const missing = routeChain(routeName).find((nodeId) => !ids.has(nodeId));
+        const missing = splitChain(state.router_config[def.stateKey]).find((nodeId) => !ids.has(nodeId));
         return missing ? `${label}链路包含不存在的节点：${missing}` : "";
     };
     writeActivePersonaFieldsFromForm();
@@ -1278,13 +1308,19 @@ function setupEventDelegation() {
         }
         if (act === "del-preset") animateDel("presets-container", state.presets, idx, renderPresets);
         if (act === "add-provider") {
-            state.providers.push({ id: `node_${state.providers.length + 1}`, api_type: "openai_image", base_url: "", model: "", available_models: [], api_keys: "", timeout: 60, default_size: "" });
+            state.providers.push({ id: `node_${state.providers.length + 1}`, api_type: "openai_image", base_url: "", model: "", available_models: [], api_keys: "", timeout: 60, default_size: "", sd_steps: 20, sd_cfg_scale: 7, sd_sampler_name: "Euler a" });
             renderProviders();
             renderSelectors();
             animateAdd("providers-container");
             setDirty();
         }
-        if (act === "del-provider") animateDel("providers-container", state.providers, idx, renderProviders, renderSelectors);
+        if (act === "del-provider") {
+            const removedId = state.providers[idx]?.id;
+            animateDel("providers-container", state.providers, idx, renderProviders, () => {
+                removeNodeFromRouteStrings(removedId, ["text2img", "selfie"]);
+                renderSelectors();
+            });
+        }
         if (act === "add-video-provider") {
             state.video_providers.push({ id: `video_node_${state.video_providers.length + 1}`, api_type: "async_task", base_url: "", model: "", available_models: [], api_keys: "", timeout: 300, default_size: "" });
             renderVideoProviders();
@@ -1292,7 +1328,13 @@ function setupEventDelegation() {
             animateAdd("video-providers-container");
             setDirty();
         }
-        if (act === "del-video-provider") animateDel("video-providers-container", state.video_providers, idx, renderVideoProviders, renderSelectors);
+        if (act === "del-video-provider") {
+            const removedId = state.video_providers[idx]?.id;
+            animateDel("video-providers-container", state.video_providers, idx, renderVideoProviders, () => {
+                removeNodeFromRouteStrings(removedId, ["video"]);
+                renderSelectors();
+            });
+        }
         if (act === "del-persona-img") {
             animateDel("persona-upload-container", getActivePersona().persona_ref_image, idx, () => {
                 syncActivePersonaMirror();
@@ -1342,6 +1384,9 @@ function setupEventDelegation() {
         if (s === "prov-url") state.providers[i].base_url = v;
         if (s === "prov-time") state.providers[i].timeout = parseFloat(v) || 60;
         if (s === "prov-size") state.providers[i].default_size = v.trim();
+        if (s === "prov-sd-steps") state.providers[i].sd_steps = Math.max(1, parseInt(v, 10) || 20);
+        if (s === "prov-sd-cfg") state.providers[i].sd_cfg_scale = Math.max(0, parseFloat(v) || 0);
+        if (s === "prov-sd-sampler") state.providers[i].sd_sampler_name = v;
         if (s === "prov-keys") state.providers[i].api_keys = v;
         if (s === "vid-id") state.video_providers[i].id = v;
         if (s === "vid-url") state.video_providers[i].base_url = v;
@@ -1470,6 +1515,9 @@ async function init() {
             available_models: availableModels,
             timeout: p.timeout || p["超时时间(秒)"] || 60,
             default_size: String(p.default_size || p.default_resolution || "").trim(),
+            sd_steps: Number.isFinite(Number(p.sd_steps)) && Number(p.sd_steps) >= 1 ? Number(p.sd_steps) : 20,
+            sd_cfg_scale: Number.isFinite(Number(p.sd_cfg_scale)) && Number(p.sd_cfg_scale) >= 0 ? Number(p.sd_cfg_scale) : 7,
+            sd_sampler_name: String(p.sd_sampler_name || "Euler a").trim() || "Euler a",
             api_keys: normalizeTextAreaKeys(p.api_keys || p["API密钥"] || "")
         };
     });
