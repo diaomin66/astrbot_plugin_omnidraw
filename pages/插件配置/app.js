@@ -673,7 +673,8 @@ function bounceRoute(routeName) {
 function syncRouteFromHidden(routeName) {
     const def = routeDefs[routeName];
     if (!def) return;
-    const primary = String(byId(def.inputId)?.value || routePrimary(routeName) || def.fallback || "").trim();
+    const configuredChain = splitChain(state.router_config[def.stateKey]);
+    const primary = String(byId(def.inputId)?.value || (configuredChain.length ? configuredChain[0] : "")).trim();
     const backups = state.route_backup_enabled[routeName]
         ? routeBackups(routeName).filter((nodeId) => nodeId !== primary)
         : [];
@@ -728,7 +729,8 @@ function renderSelectors() {
         const container = byId(def.selectorId);
         const hiddenInput = byId(def.inputId);
         if (!container || !hiddenInput) return;
-        const currentVal = routePrimary(routeName);
+        const configuredChain = splitChain(state.router_config[def.stateKey]);
+        const currentVal = configuredChain[0] || "";
         hiddenInput.value = currentVal;
         const sourceList = def.source();
         const html = sourceList.map((node) => {
@@ -875,7 +877,8 @@ function renderProviderCard(p, i, isVideo) {
             ["openai_image", "标准生图"],
             ["openai_chat", "对话透传"],
             ["gemini_official", "Gemini"],
-            ["custom_endpoint", "自定义"]
+            ["custom_endpoint", "自定义"],
+            ["stable_diffusion_webui", "Stable Diffusion WebUI"]
         ];
 
     const modeChips = modes.map(([value, label]) => {
@@ -1057,7 +1060,7 @@ function validateConfig() {
         const def = routeDefs[routeName];
         const ids = new Set(def.source().map((node) => String(node.id || "").trim()).filter(Boolean));
         if (!ids.size) return "";
-        const missing = routeChain(routeName).find((nodeId) => !ids.has(nodeId));
+        const missing = splitChain(state.router_config[def.stateKey]).find((nodeId) => !ids.has(nodeId));
         return missing ? `${label}链路包含不存在的节点：${missing}` : "";
     };
     writeActivePersonaFieldsFromForm();

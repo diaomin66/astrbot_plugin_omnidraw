@@ -350,6 +350,8 @@ def _normalize_api_type(value: Any, is_video: bool) -> str:
         return "async_task"
     if "gemini" in lowered:
         return APIType.GEMINI_OFFICIAL
+    if "stable_diffusion" in lowered or "stable-diffusion" in lowered or "a1111" in lowered or "webui" in lowered:
+        return APIType.STABLE_DIFFUSION_WEBUI
     if lowered in {"custom_endpoint", "custom"} or "自定义" in raw:
         return APIType.CUSTOM_ENDPOINT
     if "chat" in lowered or "对话" in raw:

@@ -67,8 +67,8 @@ https://github.com/diaomin66/astrbot_plugin_omnidraw/
 | 字段 | 怎么填 |
 | :--- | :--- |
 | 节点 ID | 自己取一个好记的名字，比如 `image_node_1` |
-| API 类型 | 按你的接口选择：`openai_image` 标准生图、`openai_chat` 对话透传中转站、`gemini_official` Gemini 官方、`custom_endpoint` 自定义完整路径 |
-| Base URL | 标准/对话模式填中转站或官方接口地址，例如 `https://example.com/v1`；Gemini 官方可留空或填 `https://generativelanguage.googleapis.com/v1beta`；自定义模式必须填完整请求 URL |
+| API 类型 | 按你的接口选择：`openai_image` 标准生图、`openai_chat` 对话透传中转站、`gemini_official` Gemini 官方、`custom_endpoint` 自定义完整路径、`stable_diffusion_webui` Stable Diffusion WebUI |
+| Base URL | 标准/对话模式填中转站或官方接口地址，例如 `https://example.com/v1`；Gemini 官方可留空或填 `https://generativelanguage.googleapis.com/v1beta`；自定义模式必须填完整请求 URL；Stable Diffusion WebUI 填 WebUI 根地址，例如 `http://127.0.0.1:7860` |
 | API Keys | 填你的 key，多个 key 可按页面提示添加 |
 | 模型 | 填模型名，例如 `gpt-image-1`、`gemini-3.1-flash-image-preview` 等 |
 | Timeout | 建议画图 120-300，视频 300 或更高 |
@@ -76,6 +76,8 @@ https://github.com/diaomin66/astrbot_plugin_omnidraw/
 `gemini_official` 使用 Google Gemini 原生 `generateContent` 接口，请求会发送到 `/models/{model}:generateContent`，认证使用 `x-goog-api-key`，返回图片会从 `candidates[].content.parts[].inlineData` 解析成 `data:image/...;base64,...`。
 
 `custom_endpoint` 只请求你填写的完整路径，不会自动追加 `/v1`、`/images/generations`、`/images/edits` 或 `/chat/completions`。例如要请求硅基流动、豆包或海外中转站的某个固定接口时，应直接填写 `https://api.example.com/v1/images/generations`、`https://api.example.com/v1/chat/completions` 或服务商文档给出的完整 endpoint。Chat Completions 仅适合会返回图片链接的中转站；官方 OpenAI 生图建议使用 Images 或 Responses 路径。
+
+`stable_diffusion_webui` 使用 Stable Diffusion WebUI 的 `/sdapi/v1/txt2img` 和 `/sdapi/v1/img2img` 接口。无参考图时调用 `txt2img`，带参考图时调用 `img2img`；WebUI 返回的 Base64 图片会自动转换为插件内部的图片结果。API Key 可以留空；如果 WebUI 启用了 `--api-auth`，可将 `用户名:密码` 填入 API Keys。
 
 然后在“路由 / 链路”里把：
 

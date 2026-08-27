@@ -66,14 +66,16 @@ class ChainManager:
                 skipped_errors.append(f"{provider_id}: 节点不存在")
                 logger.warning(f"⚠️ 链路 [{chain_name}] 中的节点 [{provider_id}] 不存在。")
                 continue
-            if (
-                (not provider_config.base_url or not provider_config.model)
-                and provider_config.api_type != APIType.GEMINI_OFFICIAL
-            ):
+            missing_base_url = not provider_config.base_url and provider_config.api_type != APIType.GEMINI_OFFICIAL
+            missing_model = not provider_config.model and provider_config.api_type not in {
+                APIType.GEMINI_OFFICIAL,
+                APIType.STABLE_DIFFUSION_WEBUI,
+            }
+            if missing_base_url or missing_model:
                 skipped_errors.append(f"{provider_id}: 缺少接口地址或模型")
                 logger.warning(f"⚠️ 链路 [{chain_name}] 中的节点 [{provider_id}] 缺少接口地址或模型。")
                 continue
-            if not provider_config.has_api_key:
+            if not provider_config.has_api_key and provider_config.api_type != APIType.STABLE_DIFFUSION_WEBUI:
                 skipped_errors.append(f"{provider_id}: 未配置 API Key")
                 logger.warning(f"⚠️ 链路 [{chain_name}] 中的节点 [{provider_id}] 未配置 API Key。")
                 continue
