@@ -79,6 +79,8 @@ https://github.com/diaomin66/astrbot_plugin_omnidraw/
 
 `stable_diffusion_webui` 使用 Stable Diffusion WebUI 的 `/sdapi/v1/txt2img` 和 `/sdapi/v1/img2img` 接口。无参考图时调用 `txt2img`，带参考图时调用 `img2img`；WebUI 返回的 Base64 图片会自动转换为插件内部的图片结果。API Key 可以留空；如果 WebUI 启用了 `--api-auth`，可将 `用户名:密码` 填入 API Keys。
 
+Stable Diffusion WebUI 节点还可以配置 `SD 采样步数`、`SD CFG Scale` 和 `SD 采样器自定义` 三个默认参数，分别对应 WebUI API 的 `steps`、`cfg_scale` 和 `sampler_name`。单次指令或工具调用通过 `--steps`、`--cfg_scale`、`--sampler_name` 传入的值会覆盖节点默认值。
+
 然后在“路由 / 链路”里把：
 
 - 文生图链路指向你的画图节点。

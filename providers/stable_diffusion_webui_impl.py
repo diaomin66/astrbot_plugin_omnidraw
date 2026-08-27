@@ -103,6 +103,9 @@ class StableDiffusionWebUIProvider(BaseProvider):
         size = kwargs.get("size") or kwargs.get("resolution") or self.config.default_size
         payload: Dict[str, Any] = {"prompt": str(prompt or "")}
         payload.update(self._size_params(size))
+        payload.setdefault("steps", self.config.sd_steps)
+        payload.setdefault("cfg_scale", self.config.sd_cfg_scale)
+        payload.setdefault("sampler_name", self.config.sd_sampler_name)
         model = str(kwargs.get("model") or self.config.model or "").strip()
         if model:
             payload.setdefault("override_settings", {})

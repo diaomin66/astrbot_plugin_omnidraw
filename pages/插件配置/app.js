@@ -924,6 +924,20 @@ function renderProviderCard(p, i, isVideo) {
                     <label>默认尺寸</label>
                     <input type="text" class="input-glass" value="${escapeHtml(p.default_size || "")}" placeholder="${isVideo ? "1280x720" : "1024x1024"}" data-sync="${prefix}-size" data-index="${i}">
                 </div>
+                ${!isVideo && p.api_type === "stable_diffusion_webui" ? `
+                <div class="form-group">
+                    <label>SD 采样步数</label>
+                    <input type="number" class="input-glass" value="${escapeHtml(p.sd_steps ?? 20)}" min="1" data-sync="prov-sd-steps" data-index="${i}">
+                </div>
+                <div class="form-group">
+                    <label>SD CFG Scale</label>
+                    <input type="number" class="input-glass" value="${escapeHtml(p.sd_cfg_scale ?? 7)}" min="0" step="0.1" data-sync="prov-sd-cfg" data-index="${i}">
+                </div>
+                <div class="form-group">
+                    <label>SD 采样器</label>
+                    <input type="text" class="input-glass" value="${escapeHtml(p.sd_sampler_name || "Euler a")}" data-sync="prov-sd-sampler" data-index="${i}">
+                </div>
+                ` : ""}
                 <div class="form-group full-width">
                     <label>API Keys</label>
                     <textarea class="input-glass" rows="3" data-sync="${prefix}-keys" data-index="${i}">${escapeHtml(p.api_keys)}</textarea>
@@ -1294,7 +1308,7 @@ function setupEventDelegation() {
         }
         if (act === "del-preset") animateDel("presets-container", state.presets, idx, renderPresets);
         if (act === "add-provider") {
-            state.providers.push({ id: `node_${state.providers.length + 1}`, api_type: "openai_image", base_url: "", model: "", available_models: [], api_keys: "", timeout: 60, default_size: "" });
+            state.providers.push({ id: `node_${state.providers.length + 1}`, api_type: "openai_image", base_url: "", model: "", available_models: [], api_keys: "", timeout: 60, default_size: "", sd_steps: 20, sd_cfg_scale: 7, sd_sampler_name: "Euler a" });
             renderProviders();
             renderSelectors();
             animateAdd("providers-container");
@@ -1370,6 +1384,9 @@ function setupEventDelegation() {
         if (s === "prov-url") state.providers[i].base_url = v;
         if (s === "prov-time") state.providers[i].timeout = parseFloat(v) || 60;
         if (s === "prov-size") state.providers[i].default_size = v.trim();
+        if (s === "prov-sd-steps") state.providers[i].sd_steps = Math.max(1, parseInt(v, 10) || 20);
+        if (s === "prov-sd-cfg") state.providers[i].sd_cfg_scale = Math.max(0, parseFloat(v) || 0);
+        if (s === "prov-sd-sampler") state.providers[i].sd_sampler_name = v;
         if (s === "prov-keys") state.providers[i].api_keys = v;
         if (s === "vid-id") state.video_providers[i].id = v;
         if (s === "vid-url") state.video_providers[i].base_url = v;
@@ -1498,6 +1515,9 @@ async function init() {
             available_models: availableModels,
             timeout: p.timeout || p["超时时间(秒)"] || 60,
             default_size: String(p.default_size || p.default_resolution || "").trim(),
+            sd_steps: Number.isFinite(Number(p.sd_steps)) && Number(p.sd_steps) >= 1 ? Number(p.sd_steps) : 20,
+            sd_cfg_scale: Number.isFinite(Number(p.sd_cfg_scale)) && Number(p.sd_cfg_scale) >= 0 ? Number(p.sd_cfg_scale) : 7,
+            sd_sampler_name: String(p.sd_sampler_name || "Euler a").trim() || "Euler a",
             api_keys: normalizeTextAreaKeys(p.api_keys || p["API密钥"] || "")
         };
     });

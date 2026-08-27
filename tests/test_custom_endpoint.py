@@ -233,6 +233,29 @@ class CustomEndpointHelpersTest(unittest.TestCase):
 
         self.assertIsInstance(provider, StableDiffusionWebUIProvider)
 
+    def test_stable_diffusion_webui_defaults_are_normalized(self):
+        config = PluginConfig.from_dict(
+            {
+                "providers": [
+                    {
+                        "id": "sd",
+                        "api_type": "stable_diffusion_webui",
+                        "base_url": "http://127.0.0.1:7860",
+                        "sd_steps": "30",
+                        "sd_cfg_scale": "8.5",
+                        "sd_sampler_name": "  DPM++ 2M Karras ",
+                    }
+                ]
+            },
+            str(PLUGIN_DIR),
+        )
+
+        provider = config.providers[0]
+
+        self.assertEqual(provider.sd_steps, 30)
+        self.assertEqual(provider.sd_cfg_scale, 8.5)
+        self.assertEqual(provider.sd_sampler_name, "DPM++ 2M Karras")
+
     def test_extracts_gemini_inline_data_response(self):
         endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent"
         first = base64.b64encode(b"first-image" * 20).decode("ascii")
@@ -1939,6 +1962,21 @@ class StableDiffusionWebUIProviderTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(request["json"]["override_settings_restore_afterwards"], True)
         self.assertNotIn("Authorization", request["headers"])
+
+    async def test_request_parameters_override_node_defaults(self):
+        provider, session = self._provider()
+
+        await provider.generate_image(
+            "draw a cat",
+            steps="35",
+            cfg_scale="9",
+            sampler_name="DPM++ SDE",
+        )
+
+        payload = session.posts[0]["json"]
+        self.assertEqual(payload["steps"], 35)
+        self.assertEqual(payload["cfg_scale"], 9)
+        self.assertEqual(payload["sampler_name"], "DPM++ SDE")
 
     async def test_img2img_uses_plain_base64_reference_and_basic_auth(self):
         provider, session = self._provider(api_keys=["user:password"])

@@ -13,4 +13,12 @@ http://127.0.0.1:7860
 
 请求体是 Stable Diffusion WebUI API 的 JSON 格式。`size` 或 `resolution` 会转换为 `width` 和 `height`；`model` 会作为 `override_settings.sd_model_checkpoint` 传入；其他 `--key value` 参数会透传到请求体。
 
+节点可以配置以下默认参数：
+
+- `sd_steps`：SD 采样步数，默认 `20`
+- `sd_cfg_scale`：SD CFG Scale，默认 `7`
+- `sd_sampler_name`：SD 采样器，默认 `Euler a`
+
+调用参数 `--steps`、`--cfg_scale`、`--sampler_name` 优先于节点默认值。
+
 WebUI 返回的 `images` 数组中的第一张 Base64 图片会作为生成结果。API Key 可以留空；启用 `--api-auth` 时，将 `用户名:密码` 填入节点的 API Keys 字段即可。
