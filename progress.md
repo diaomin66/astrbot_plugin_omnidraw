@@ -74,3 +74,24 @@
   - `core/chain_manager.py`：修复无占位符 f-string。
   - `tests/test_custom_endpoint.py`：增加缓存路径泄露回归测试。
 - 回滚方式：对以上文件执行 `git restore -- <file>`；保留此前安全修复时，需只回滚本节列出的文件。
+
+## 2026-09-05 - Task: 解决 PR #61 与 main 的合并冲突
+
+### What was done
+
+- 同步远端 `main` 最新提交 `3f054b2` 到 `codex/page-deep-optimization`。
+- 逐文件完成冲突决策：保留本分支的安全、稳定性和 Page 优化，同时纳入 `main` 的异步 I/O、参考图、多任务和文档更新。
+- 生成合并提交 `4fef5c8` 并推送到 PR 分支。
+
+### Testing
+
+- `python -m pytest -q -p no:cacheprovider`：125 passed，45 subtests passed。
+- `python -m ruff check .`：All checks passed。
+- `node --check pages/插件配置/app.js`：通过。
+- `git diff --check`：通过。
+- GitHub PR 状态：`MERGEABLE`，`CLEAN`。
+
+### Notes
+
+- 修改文件：`progress.md`，追加本次冲突解决与验证记录。
+- 回滚点：合并前提交 `e2c4166`；如需撤销合并，可执行 `git reset --hard e2c4166`，再强制更新远端分支（仅在明确确认后执行）。
