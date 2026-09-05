@@ -1,11 +1,12 @@
 """Google Gemini native image provider."""
 
+import asyncio
 import base64
 import json
 import math
 import re
 from typing import Any, Dict, List
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote
 
 import aiohttp
 from astrbot.api import logger
@@ -15,15 +16,15 @@ from .base import (
     BaseProvider,
     extract_error_message,
     extract_image_url_from_response,
-    MAX_REFERENCE_IMAGES,
+    guess_image_content_type,
     normalize_base_url,
-    read_response_text_limited,
     summarize_payload_json_for_log,
     summarize_response_text_for_log,
     summarize_url_for_log,
 )
 
 
+MAX_REFERENCE_IMAGES = 14
 ALLOWED_ASPECT_RATIOS = (
     "1:1",
     "3:4",
@@ -46,37 +47,33 @@ class GeminiOfficialProvider(BaseProvider):
     """Call Google's native Gemini generateContent endpoint."""
 
     async def _get_image_bytes(self, image_path_or_url: str) -> bytes:
-        image_bytes, _ = await self.read_reference_image(image_path_or_url)
-        return image_bytes
+        return await self.fetch_reference_bytes(image_path_or_url)
 
     async def _inline_image_part(self, image_path_or_url: str) -> Dict[str, Any]:
-        image_bytes, mime_type = await self.read_reference_image(image_path_or_url)
+        image_bytes = await self._get_image_bytes(image_path_or_url)
+        encoded = await asyncio.to_thread(lambda: base64.b64encode(image_bytes).decode("ascii"))
         return {
             "inlineData": {
-                "mimeType": mime_type,
-                "data": base64.b64encode(image_bytes).decode("ascii"),
+                "mimeType": guess_image_content_type(image_path_or_url),
+                "data": encoded,
             }
         }
 
     def _request_model(self, api_kwargs: Dict[str, Any]) -> str:
-        model = str(self.config.model or DEFAULT_GEMINI_MODEL).strip()
+        model = str(api_kwargs.pop("model", "") or self.config.model or DEFAULT_GEMINI_MODEL).strip()
         if model.startswith("models/"):
             return model.split("/", 1)[1]
         return model
 
     def _endpoint(self, model: str) -> str:
         base_url = normalize_base_url(self.config.base_url) or DEFAULT_GEMINI_BASE_URL
-        parsed = urlparse(base_url)
-        path = parsed.path.rstrip("/")
-        if path.lower().endswith(":generatecontent"):
+        if ":generateContent" in base_url:
             return base_url
-        if "/models/" in path.lower():
-            path += ":generateContent"
-        else:
-            if path.lower().endswith("/models"):
-                path = path[: -len("/models")]
-            path += f"/models/{quote(model, safe='-._~')}:generateContent"
-        return urlunparse(parsed._replace(path=path))
+        if "/models/" in base_url:
+            return f"{base_url}:generateContent"
+        if base_url.endswith("/models"):
+            base_url = base_url[: -len("/models")]
+        return f"{base_url}/models/{quote(model, safe='-._~')}:generateContent"
 
     def _pop_any(self, params: Dict[str, Any], *names: str) -> Any:
         for name in names:
@@ -178,7 +175,7 @@ class GeminiOfficialProvider(BaseProvider):
         logger.info(f"📤 [Gemini官方通道] 请求路径: {summarize_url_for_log(endpoint)}")
         logger.info(f"📤 [Gemini官方通道] 请求体摘要: {summarize_payload_json_for_log(payload)}")
         async with self.session.post(endpoint, json=payload, headers=headers, timeout=timeout_obj) as response:
-            text = await read_response_text_limited(response)
+            text = await response.text()
             if response.status >= 400:
                 logger.error("💥 Gemini官方通道 API 返回错误摘要: " + summarize_response_text_for_log(text, max_string_length=500))
                 raise RuntimeError(f"HTTP {response.status}: {extract_error_message(text)}")
@@ -197,8 +194,11 @@ class GeminiOfficialProvider(BaseProvider):
             raise ValueError("节点未配置 API Key！")
 
         ref_images = self.get_reference_images(**kwargs)
-        api_kwargs = self.filter_api_kwargs(kwargs)
-        loaded_refs = await self.load_reference_images(ref_images, max_images=MAX_REFERENCE_IMAGES)
+        if len(ref_images) > MAX_REFERENCE_IMAGES:
+            raise ValueError(f"Gemini 官方接口最多支持 {MAX_REFERENCE_IMAGES} 张参考图。")
+
+        internal_keys = {"user_refs", "user_ref", "persona_refs", "persona_ref"}
+        api_kwargs = {key: value for key, value in kwargs.items() if key not in internal_keys}
         model = self._request_model(api_kwargs)
         if not model:
             raise ValueError("Gemini 官方节点未配置模型名！")
@@ -210,15 +210,11 @@ class GeminiOfficialProvider(BaseProvider):
         }
 
         parts: List[Dict[str, Any]] = [{"text": str(prompt or "")}]
-        for image_bytes, mime_type in loaded_refs:
-            parts.append(
-                {
-                    "inlineData": {
-                        "mimeType": mime_type,
-                        "data": base64.b64encode(image_bytes).decode("ascii"),
-                    }
-                }
-            )
+        for index, ref_image in enumerate(ref_images, start=1):
+            try:
+                parts.append(await self._inline_image_part(ref_image))
+            except Exception as exc:
+                raise RuntimeError(f"读取第 {index} 张参考图数据失败: {exc}")
 
         payload: Dict[str, Any] = {
             "contents": [{"role": "user", "parts": parts}],
