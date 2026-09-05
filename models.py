@@ -2,8 +2,10 @@
 AstrBot 万象画卷插件 - 数据模型与配置归一化。
 """
 import binascii
+import math
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -12,14 +14,19 @@ from .constants import (
     DEFAULT_GEMINI_MODEL,
     DEFAULT_DRAW_ERROR_MESSAGE,
     DEFAULT_DRAW_PENDING_MESSAGE,
+    DEFAULT_OPTIMIZER_MODEL,
+    DEFAULT_OPTIMIZER_STYLE,
+    MAX_IMAGE_BYTES,
     DEFAULT_SELFIE_ERROR_MESSAGE,
     DEFAULT_SELFIE_PENDING_MESSAGE,
+    MAX_BATCH_LIMIT,
+    OPTIMIZER_STYLE_OPTIONS,
 )
 from .utils import save_image_bytes, split_data_url
 
 PLUGIN_NAME = "astrbot_plugin_omnidraw"
 PLUGIN_AUTHOR = "雪碧bir"
-PLUGIN_VERSION = "3.3.23"
+PLUGIN_VERSION = "3.3.21"
 DEFAULT_CACHE_CLEANUP_INTERVAL_HOURS = 24
 DEFAULT_MAX_CACHE_SIZE_MB = 512
 
@@ -63,7 +70,6 @@ class PluginConfig:
     chains: Dict[str, List[str]]
     presets: Dict[str, str]
     enable_optimizer: bool
-    optimizer_use_astrbot_provider: bool
     optimizer_model: str
     optimizer_timeout: float
     max_batch_count: int
@@ -98,17 +104,17 @@ class PluginConfig:
     show_request_model: bool
 
     @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any], data_dir: str) -> "PluginConfig":
+    def from_dict(
+        cls,
+        config_dict: Dict[str, Any],
+        data_dir: str,
+        cleanup_persona_refs: bool = True,
+    ) -> "PluginConfig":
         if not isinstance(config_dict, dict):
             config_dict = {}
 
-        providers = [_build_provider_config(p, is_video=False) for p in _as_list(config_dict.get("providers", []))]
-        providers = [provider for provider in providers if provider.id]
-
-        video_providers = [
-            _build_provider_config(p, is_video=True) for p in _as_list(config_dict.get("video_providers", []))
-        ]
-        video_providers = [provider for provider in video_providers if provider.id]
+        providers = _normalize_provider_configs(config_dict, "providers", is_video=False)
+        video_providers = _normalize_provider_configs(config_dict, "video_providers", is_video=True)
 
         presets_dict = {}
         normalized_presets = []
@@ -138,11 +144,13 @@ class PluginConfig:
         cache_conf = _ensure_dict(config_dict, "cache_config")
         reply_conf = _ensure_dict(config_dict, "reply_config")
 
-        for legacy_key in ("persona_name", "persona_base_prompt", "persona_ref_image", "persona_ref_images"):
-            if legacy_key in config_dict and legacy_key not in persona_conf:
-                persona_conf[legacy_key] = config_dict[legacy_key]
+        _migrate_legacy_persona_config(config_dict, persona_conf)
 
-        personas, active_persona = _normalize_persona_profiles(persona_conf, data_dir)
+        personas, active_persona = _normalize_persona_profiles(
+            persona_conf,
+            data_dir,
+            cleanup=cleanup_persona_refs,
+        )
         persona_conf["profiles"] = [profile.to_config_dict() for profile in personas]
         persona_conf["active_persona_id"] = active_persona.id
         persona_conf["persona_name"] = active_persona.name
@@ -155,9 +163,19 @@ class PluginConfig:
             "video": _parse_chain(router_conf.get("chain_video", "video_node_1")),
             "optimizer": _parse_chain(opt_conf.get("chain_optimizer", "node_1")),
         }
-        optimizer_model = str(opt_conf.get("optimizer_model", "")).strip()
-        if not optimizer_model and providers:
-            optimizer_model = providers[0].model
+        enable_optimizer = _to_bool(opt_conf.get("enable_optimizer"), True)
+        optimizer_model = _normalize_optional_text(opt_conf.get("optimizer_model")) or DEFAULT_OPTIMIZER_MODEL
+        optimizer_style = _normalize_optimizer_style(opt_conf.get("optimizer_style"))
+        max_batch_count = _to_int(
+            opt_conf.get("max_batch_count", 0),
+            0,
+            minimum=0,
+            maximum=MAX_BATCH_LIMIT,
+        )
+        opt_conf["enable_optimizer"] = enable_optimizer
+        opt_conf["optimizer_model"] = optimizer_model
+        opt_conf["optimizer_style"] = optimizer_style
+        opt_conf["max_batch_count"] = max_batch_count
         usable_users = _merge_unique_values(
             perm_conf.get("usable_users", ""),
             perm_conf.get("access_users", ""),
@@ -237,11 +255,10 @@ class PluginConfig:
             video_providers=video_providers,
             chains=chains,
             presets=presets_dict,
-            enable_optimizer=_to_bool(opt_conf.get("enable_optimizer", True)),
-            optimizer_use_astrbot_provider=_to_bool(opt_conf.get("use_astrbot_provider", False)),
-            optimizer_model=optimizer_model or "gpt-4o-mini",
-            optimizer_timeout=_to_float(opt_conf.get("optimizer_timeout", 15.0), 15.0, minimum=1.0),
-            max_batch_count=_to_int(opt_conf.get("max_batch_count", 0), 0, minimum=0),
+            enable_optimizer=enable_optimizer,
+            optimizer_model=optimizer_model,
+            optimizer_timeout=_to_float(opt_conf.get("optimizer_timeout", 15.0), 15.0, minimum=1.0, maximum=3600.0),
+            max_batch_count=max_batch_count,
             persona_name=active_persona.name,
             persona_base_prompt=active_persona.base_prompt,
             persona_ref_image=active_persona.ref_images[0] if active_persona.ref_images else "",
@@ -262,7 +279,7 @@ class PluginConfig:
             scheduled_cleanup_interval_hours=scheduled_cleanup_interval_hours,
             enable_size_limit_cleanup=enable_size_limit_cleanup,
             max_cache_size_mb=max_cache_size_mb,
-            optimizer_style=str(opt_conf.get("optimizer_style", "手机日常原生感")).strip() or "手机日常原生感",
+            optimizer_style=optimizer_style,
             optimizer_custom_prompt=str(opt_conf.get("optimizer_custom_prompt", "")),
             draw_pending_message=draw_pending_message,
             selfie_pending_message=selfie_pending_message,
@@ -323,11 +340,15 @@ def _split_csv_or_lines(value: Any) -> List[str]:
 def _parse_models(value: Any) -> List[str]:
     if isinstance(value, (list, tuple)):
         raw_items = value
+    elif isinstance(value, (str, int, float)) and not isinstance(value, bool):
+        raw_items = re.split(r"[\r\n,]+", str(value))
     else:
-        raw_items = str(value or "").split(",")
+        raw_items = []
     seen = set()
     models = []
     for item in raw_items:
+        if isinstance(item, (dict, list, tuple, set)) or item is None:
+            continue
         model = str(item).strip()
         if model and model not in seen:
             seen.add(model)
@@ -341,14 +362,26 @@ def _normalize_api_type(value: Any, is_video: bool) -> str:
         return "async_task" if is_video else "openai_image"
     lowered = raw.lower()
     if is_video:
-        if lowered.startswith("async") or "异步" in raw:
-            return "async_task"
-        if "chat" in lowered or "对话" in raw:
+        normalized = re.sub(r"[\s/-]+", "_", lowered).strip("_")
+        if normalized in {
+            "openai_chat",
+            "openai_chat_completion",
+            "openai_chat_completions",
+            "chat",
+            "chat_completion",
+            "chat_completions",
+        } or raw in {
+            "对话",
+            "对话模式",
+        }:
             return "openai_chat"
-        if "sync" in lowered or "同步" in raw:
+        if normalized in {"openai_sync", "sync", "sync_task", "synchronous"} or raw in {
+            "同步",
+            "同步模式",
+        }:
             return "openai_sync"
         return "async_task"
-    if "gemini" in lowered:
+    if lowered in {"gemini", "gemini_official", "google_gemini"} or "gemini" in lowered or "gemini" in raw.lower():
         return APIType.GEMINI_OFFICIAL
     if lowered in {"custom_endpoint", "custom"} or "自定义" in raw:
         return APIType.CUSTOM_ENDPOINT
@@ -362,13 +395,12 @@ def _build_provider_config(raw_provider: Any, is_video: bool) -> ProviderConfig:
         raw_provider = {}
 
     model_raw = raw_provider.get("model", raw_provider.get("模型名称", ""))
+    model_candidates = _parse_models(model_raw)
     available_models = _parse_models(raw_provider.get("available_models", []))
     if not available_models:
-        available_models = _parse_models(model_raw)
+        available_models = list(model_candidates)
 
-    model = str(model_raw or "").strip()
-    if "," in model:
-        model = model.split(",", 1)[0].strip()
+    model = model_candidates[0] if model_candidates else ""
     if not model and available_models:
         model = available_models[0]
     api_type = _normalize_api_type(raw_provider.get("api_type", raw_provider.get("接口模式", "")), is_video)
@@ -379,7 +411,7 @@ def _build_provider_config(raw_provider: Any, is_video: bool) -> ProviderConfig:
 
     default_timeout = 300.0 if is_video else 60.0
     return ProviderConfig(
-        id=str(raw_provider.get("id", raw_provider.get("节点ID", ""))).strip(),
+        id=_normalize_scalar_text(raw_provider.get("id", raw_provider.get("节点ID", ""))),
         api_type=api_type,
         base_url=str(
             raw_provider.get(
@@ -389,10 +421,34 @@ def _build_provider_config(raw_provider: Any, is_video: bool) -> ProviderConfig:
         ).strip(),
         api_keys=_split_csv_or_lines(raw_provider.get("api_keys", raw_provider.get("API密钥", ""))),
         model=model,
-        timeout=_to_float(raw_provider.get("timeout", raw_provider.get("超时时间(秒)", default_timeout)), default_timeout, 1.0),
+        timeout=_to_float(
+            raw_provider.get("timeout", raw_provider.get("超时时间(秒)", default_timeout)),
+            default_timeout,
+            minimum=1.0,
+            maximum=3600.0,
+        ),
         default_size=_normalize_optional_text(raw_provider.get("default_size", raw_provider.get("default_resolution", ""))),
         available_models=available_models,
     )
+
+
+def _normalize_provider_configs(config_dict: Dict[str, Any], key: str, is_video: bool) -> List[ProviderConfig]:
+    providers: List[ProviderConfig] = []
+    normalized_raw: List[Dict[str, Any]] = []
+    for raw_provider in _as_list(config_dict.get(key, [])):
+        if not isinstance(raw_provider, dict):
+            continue
+        provider = _build_provider_config(raw_provider, is_video=is_video)
+        if not provider.id:
+            continue
+        raw_provider["id"] = provider.id
+        raw_provider["api_type"] = provider.api_type
+        raw_provider["model"] = provider.model
+        raw_provider["available_models"] = list(provider.available_models)
+        normalized_raw.append(raw_provider)
+        providers.append(provider)
+    config_dict[key] = normalized_raw
+    return providers
 
 
 def _parse_chain(value: Any) -> List[str]:
@@ -431,39 +487,145 @@ def _normalize_reply_text(value: Any, default: str) -> str:
     return text or default
 
 
+def _normalize_scalar_text(value: Any) -> str:
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return ""
+    return str(value).strip()
+
+
 def _normalize_optional_text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _to_bool(value: Any) -> bool:
+def _normalize_optimizer_style(value: Any) -> str:
+    style = _normalize_scalar_text(value)
+    aliases = {
+        "电影感写真": "电影级光影大片",
+        "二次元精修": "日系插画大师",
+    }
+    style = aliases.get(style, style)
+    return style if style in OPTIMIZER_STYLE_OPTIONS else DEFAULT_OPTIMIZER_STYLE
+
+
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
         return bool(value)
-    return str(value).strip().lower() not in {"false", "0", "no", "off", "关闭"}
+    text = str(value).strip().lower()
+    if not text:
+        return bool(default)
+    if text in {"true", "1", "yes", "on", "enabled", "是", "开启", "启用"}:
+        return True
+    if text in {"false", "0", "no", "off", "disabled", "否", "关闭", "禁用"}:
+        return False
+    return bool(default)
 
 
-def _to_float(value: Any, default: float, minimum: Optional[float] = None) -> float:
+def _to_float(
+    value: Any,
+    default: float,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> float:
     try:
         result = float(str(value).strip())
+        if not math.isfinite(result):
+            raise ValueError("non-finite number")
     except Exception:
         result = default
     if minimum is not None:
         result = max(minimum, result)
+    if maximum is not None:
+        result = min(maximum, result)
     return result
 
 
-def _to_int(value: Any, default: int, minimum: Optional[int] = None) -> int:
+def _to_int(
+    value: Any,
+    default: int,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
     try:
         result = int(float(str(value).strip()))
     except Exception:
         result = default
     if minimum is not None:
         result = max(minimum, result)
+    if maximum is not None:
+        result = min(maximum, result)
     return result
 
 
-def _normalize_persona_profiles(persona_conf: Dict[str, Any], data_dir: str) -> Tuple[List[PersonaProfile], PersonaProfile]:
+def _migrate_legacy_persona_config(config_dict: Dict[str, Any], persona_conf: Dict[str, Any]) -> None:
+    legacy_name = _normalize_scalar_text(config_dict.get("persona_name"))
+    legacy_base_prompt = _normalize_scalar_text(config_dict.get("persona_base_prompt"))
+    legacy_images = config_dict.get("persona_ref_image")
+    if not any(_as_list(legacy_images)):
+        legacy_images = config_dict.get("persona_ref_images")
+
+    has_legacy_payload = (
+        legacy_name not in {"", "默认助理"}
+        or bool(legacy_base_prompt)
+        or any(_as_list(legacy_images))
+    )
+    if not has_legacy_payload or _has_persona_config_payload(persona_conf):
+        return
+
+    persona_conf["profiles"] = []
+    if legacy_name:
+        persona_conf["persona_name"] = legacy_name
+    if legacy_base_prompt:
+        persona_conf["persona_base_prompt"] = legacy_base_prompt
+    if any(_as_list(legacy_images)):
+        persona_conf["persona_ref_image"] = legacy_images
+
+
+def _has_persona_config_payload(persona_conf: Dict[str, Any]) -> bool:
+    active_id = _normalize_scalar_text(persona_conf.get("active_persona_id"))
+    if active_id not in {"", "default"}:
+        return True
+
+    profiles = persona_conf.get("profiles")
+    if isinstance(profiles, list):
+        for index, profile in enumerate(profiles):
+            if not isinstance(profile, dict):
+                continue
+            expected_id = "default" if index == 0 else f"persona_{index + 1}"
+            expected_name = "默认助理" if index == 0 else f"人设 {index + 1}"
+            profile_id = _normalize_scalar_text(profile.get("id"))
+            profile_name = _normalize_scalar_text(profile.get("persona_name", profile.get("name")))
+            profile_prompt = _normalize_scalar_text(
+                profile.get("persona_base_prompt", profile.get("base_prompt"))
+            )
+            profile_images = profile.get(
+                "persona_ref_image",
+                profile.get("persona_ref_images", profile.get("ref_images")),
+            )
+            if (
+                profile_id not in {"", expected_id}
+                or profile_name not in {"", expected_name}
+                or profile_prompt
+                or any(_as_list(profile_images))
+            ):
+                return True
+
+    compat_name = _normalize_scalar_text(persona_conf.get("persona_name"))
+    compat_prompt = _normalize_scalar_text(persona_conf.get("persona_base_prompt"))
+    compat_images = persona_conf.get("persona_ref_image")
+    if not any(_as_list(compat_images)):
+        compat_images = persona_conf.get("persona_ref_images")
+    return compat_name not in {"", "默认助理"} or bool(compat_prompt) or any(_as_list(compat_images))
+
+
+def _normalize_persona_profiles(
+    persona_conf: Dict[str, Any],
+    data_dir: str,
+    cleanup: bool = True,
+) -> Tuple[List[PersonaProfile], PersonaProfile]:
     refs_dir = os.path.join(data_dir, "persona_refs")
     raw_profiles = persona_conf.get("profiles")
     if not isinstance(raw_profiles, list) or not raw_profiles:
@@ -513,7 +675,8 @@ def _normalize_persona_profiles(persona_conf: Dict[str, Any], data_dir: str) -> 
     if not profiles:
         profiles.append(PersonaProfile(id="default", name="默认助理", base_prompt="", ref_images=[]))
 
-    _cleanup_unused_persona_refs(refs_dir, active_refs)
+    if cleanup:
+        _cleanup_unused_persona_refs(refs_dir, active_refs)
 
     active_id = str(persona_conf.get("active_persona_id", "")).strip()
     active_persona = next(
@@ -548,16 +711,21 @@ def _process_persona_images(raw_images: Any, refs_dir: str, cleanup: bool = True
     for idx, img_data in enumerate(_as_list(raw_images)):
         if not img_data:
             continue
-        img_ref = str(img_data)
+        img_ref = _normalize_scalar_text(img_data)
+        if not img_ref:
+            continue
         if _is_page_preview_ref(img_ref):
             continue
         if img_ref.startswith("data:image"):
             saved_path = _save_data_url_image(img_ref, refs_dir, idx)
             if saved_path:
                 processed_images.append(saved_path)
+        elif _is_http_image_ref(img_ref):
+            processed_images.append(img_ref)
         else:
             img_ref = _resolve_plugin_file_ref(img_ref, plugin_data_dir)
-            processed_images.append(img_ref)
+            if _is_safe_persisted_image_path(img_ref, plugin_data_dir):
+                processed_images.append(os.path.abspath(img_ref))
 
     if cleanup:
         _cleanup_unused_persona_refs(refs_dir, processed_images)
@@ -566,10 +734,10 @@ def _process_persona_images(raw_images: Any, refs_dir: str, cleanup: bool = True
 
 def _resolve_plugin_file_ref(image_ref: str, plugin_data_dir: str) -> str:
     normalized = image_ref.replace("\\", "/").lstrip("/")
-    if not normalized.startswith("files/"):
-        return image_ref
-
-    abs_path = os.path.abspath(os.path.join(plugin_data_dir, *normalized.split("/")))
+    if normalized.startswith("files/") or not os.path.isabs(image_ref):
+        abs_path = os.path.abspath(os.path.join(plugin_data_dir, *normalized.split("/")))
+    else:
+        abs_path = os.path.abspath(image_ref)
     try:
         common = os.path.commonpath([plugin_data_dir, abs_path])
     except ValueError:
@@ -579,6 +747,46 @@ def _resolve_plugin_file_ref(image_ref: str, plugin_data_dir: str) -> str:
     return abs_path
 
 
+def _is_http_image_ref(image_ref: str) -> bool:
+    lowered = str(image_ref or "").strip().lower()
+    return lowered.startswith(("http://", "https://"))
+
+
+def _is_safe_persisted_image_path(image_ref: str, plugin_data_dir: str) -> bool:
+    candidate = os.path.abspath(str(image_ref or ""))
+    data_dir = os.path.abspath(plugin_data_dir)
+    try:
+        if os.path.commonpath([data_dir, candidate]) != data_dir:
+            return False
+        real_data_dir = os.path.realpath(data_dir)
+        if os.path.commonpath([real_data_dir, os.path.realpath(candidate)]) != real_data_dir:
+            return False
+    except (OSError, ValueError):
+        return False
+
+    relative = os.path.relpath(candidate, data_dir)
+    current = data_dir
+    for component in relative.split(os.sep):
+        if component in {"", "."}:
+            continue
+        current = os.path.join(current, component)
+        if os.path.islink(current):
+            return False
+
+    extension = os.path.splitext(candidate)[1].lower().lstrip(".")
+    if extension not in {"png", "jpg", "jpeg", "jfif", "gif", "webp", "bmp", "avif", "tif", "tiff"}:
+        return False
+    try:
+        file_stat = os.stat(candidate, follow_symlinks=False)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size <= 0 or file_stat.st_size > MAX_IMAGE_BYTES:
+            return False
+        with open(candidate, "rb") as file:
+            image_kind = _detect_image_kind(file.read(32))
+    except (OSError, ValueError):
+        return False
+    return _image_kind_matches_extension(image_kind, extension)
+
+
 def _is_page_preview_ref(image_ref: str) -> bool:
     return "astrbot_plugin_omnidraw/get_image" in str(image_ref)
 
@@ -586,9 +794,44 @@ def _is_page_preview_ref(image_ref: str) -> bool:
 def _save_data_url_image(data_url: str, refs_dir: str, idx: int) -> str:
     try:
         image_bytes, content_type = split_data_url(data_url)
+        if len(image_bytes) <= 0 or len(image_bytes) > MAX_IMAGE_BYTES:
+            return ""
+        image_kind = _detect_image_kind(image_bytes[:32])
+        expected_extension = str(content_type or "").lower().split("/", 1)[-1]
+        if not _image_kind_matches_extension(image_kind, expected_extension):
+            return ""
         return save_image_bytes(image_bytes, refs_dir, data_url, "ref", idx, content_type)
     except (ValueError, binascii.Error, OSError):
         return ""
+
+
+def _detect_image_kind(header: bytes) -> str:
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return "webp"
+    if header.startswith(b"BM"):
+        return "bmp"
+    if header.startswith((b"II*\x00", b"MM\x00*")):
+        return "tiff"
+    if len(header) >= 12 and header[4:8] == b"ftyp" and header[8:12] in {b"avif", b"avis"}:
+        return "avif"
+    return ""
+
+
+def _image_kind_matches_extension(image_kind: str, extension: str) -> bool:
+    if not image_kind:
+        return False
+    extension = str(extension or "").lower().lstrip(".")
+    if extension in {"jpg", "jpeg", "jfif"}:
+        return image_kind == "jpeg"
+    if extension in {"tif", "tiff"}:
+        return image_kind == "tiff"
+    return image_kind == extension
 
 
 def _cleanup_unused_persona_refs(refs_dir: str, active_refs: List[str]) -> None:

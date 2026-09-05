@@ -20,9 +20,9 @@
 - **图生图 / 改图**：发送参考图和提示词，让模型按图修改或重绘。
 - **人设自拍**：先在配置页上传人设参考图，再用 `/自拍` 生成固定角色的日常照片。
 - **多个人设**：支持多组人设，每组人设都有自己的名称、基础描述和参考图组。
-- **人设快速切换**：可以在 WebUI 切换，也可以用 `/切换人设` 指令切换。
+- **人设快速切换**：可以在 WebUI 切换，管理员也可以用 `/切换人设` 指令切换。
 - **副脑优化**：自动把简单中文描述优化成更适合画图模型理解的英文提示词。
-- **多模型热切换**：同一个画图、自拍或视频链路里可以放多个模型，随时切换。
+- **多模型热切换**：同一个画图、自拍或视频链路里可以放多个模型，由管理员随时切换。
 - **预设指令管理**：可在聊天里查看预设名、查看单个预设详情，并由管理员添加或删除预设。
 - **视频生成**：支持较慢的视频模型，提交后后台等待，完成后自动推送结果。
 - **权限控制**：`可使用人员白名单` 用来直接限制谁能用；`用户白名单` 只负责不限次数，不负责限制权限。
@@ -58,7 +58,7 @@ https://github.com/diaomin66/astrbot_plugin_omnidraw/
 
 如果刚打开页面没有数据，先刷新 AstrBot 后台或重载插件。
 
-你也可以直接在 AstrBot 原生插件配置处编辑 `_conf_schema.json` 展示出来的配置项。原生配置页和 `Pages / 插件配置` 使用同一套配置结构：在 Pages 保存会同步回原生配置；在原生配置页保存后，重载插件或重新打开 Pages 会读取最新配置。
+你也可以直接在 AstrBot 原生插件配置处编辑 `_conf_schema.json` 展示出来的配置项。原生配置页和 `Pages / 插件配置` 使用同一套配置结构：Pages 会先保存并热加载插件自己的配置，再尽力同步回 AstrBot 原生配置；如果原生同步失败，本地配置仍会生效并在日志中记录警告。在原生配置页保存后，重载插件或重新打开 Pages 会读取最新配置。
 
 ### 3. 配置画图模型
 
@@ -70,7 +70,7 @@ https://github.com/diaomin66/astrbot_plugin_omnidraw/
 | API 类型 | 按你的接口选择：`openai_image` 标准生图、`openai_chat` 对话透传中转站、`gemini_official` Gemini 官方、`custom_endpoint` 自定义完整路径 |
 | Base URL | 标准/对话模式填中转站或官方接口地址，例如 `https://example.com/v1`；Gemini 官方可留空或填 `https://generativelanguage.googleapis.com/v1beta`；自定义模式必须填完整请求 URL |
 | API Keys | 填你的 key，多个 key 可按页面提示添加 |
-| 模型 | 填模型名，例如 `gpt-image-1`、`gemini-3.1-flash-image-preview` 等 |
+| 模型 | 填模型名，例如 `gpt-image-1`、`gemini-3.1-flash-image` 等 |
 | Timeout | 建议画图 120-300，视频 300 或更高 |
 
 `gemini_official` 使用 Google Gemini 原生 `generateContent` 接口，请求会发送到 `/models/{model}:generateContent`，认证使用 `x-goog-api-key`，返回图片会从 `candidates[].content.parts[].inlineData` 解析成 `data:image/...;base64,...`。
@@ -197,9 +197,10 @@ https://github.com/diaomin66/astrbot_plugin_omnidraw/
 | `/自拍 [动作/场景]` | 使用当前人设生成自拍 | `/自拍 在海边散步，手机自拍` |
 | `/视频 [提示词]` | 提交视频生成任务 | `/视频 两个人在森林里跳舞，镜头缓慢推进` |
 | `/人设` | 查看所有人设和当前人设 | `/人设` |
-| `/切换人设 [序号/ID/名称]` | 切换当前人设 | `/切换人设 2` |
-| `/切换模型 [目标]` | 查看某类链路的可用模型 | `/切换模型 画图` |
-| `/切换模型 [目标] [序号/名称]` | 切换指定模型 | `/切换模型 画图 2` |
+| `/切换人设 [序号/ID/名称]` | 管理员切换当前人设 | `/切换人设 2` |
+| `/切换链路 [目标] [节点ID]` | 管理员切换指定链路的首选节点 | `/切换链路 画图 node_2` |
+| `/切换模型 [目标]` | 管理员查看某类链路的可用模型 | `/切换模型 画图` |
+| `/切换模型 [目标] [序号/名称]` | 管理员切换指定模型 | `/切换模型 画图 2` |
 | `/查看预设` | 查看所有预设名，不显示提示词 | `/查看预设` |
 | `/查看预设 [预设名]` | 查看单个预设的名称和提示词 | `/查看预设 胶片少女` |
 | `/添加预设 [预设名] [提示词]` | 管理员添加或更新预设 | `/添加预设 胶片少女 35mm film portrait` |
@@ -255,7 +256,7 @@ https://github.com/diaomin66/astrbot_plugin_omnidraw/
 可选参数：
 
 - `return_result=true`：启用返回式生图；不传或为 `false` 时保持原自动下发行为。
-- `refs`：参考图 URL、本地路径或 data URL；多个参考图可用换行分隔，也可传 JSON 数组字符串。
+- `refs`：参考图 URL、data URL，或插件数据目录内的本地路径；多个参考图可用换行分隔，也可传 JSON 数组字符串。显式传入的其他本地路径会被拒绝。
 - `aspect_ratio`、`size`、`extra_params`：与普通 `generate_image` 一致。
 - 自拍模式请调用现有 `generate_selfie(return_result=true)` 工具，不需要新增 `generate_selfie_image`。返回结构相同，`mode` 为 `selfie`，会按 `/自拍` 的逻辑构建人设提示词并优先走自拍链路；未传 `refs` 时使用当前激活人设参考图。
 
@@ -273,7 +274,9 @@ Content-Type: application/json
 }
 ```
 
-Web API 返回同样的 JSON 结构。自拍模式可传 `{"mode": "selfie", "action": "看着镜头微笑"}`，也兼容 `{"selfie": true}`。为了避免绕过具体用户上下文，Web API 不会自动扣用户额度；通过 `generate_image(return_result=true)` 或 `generate_selfie(return_result=true)` 且传入事件上下文时，会沿用原权限和额度逻辑。
+Web API 返回同样的 JSON 结构。自拍模式可传 `{"mode": "selfie", "action": "看着镜头微笑"}`，也兼容 `{"selfie": true}`。该接口是供受信任的本机插件桥接使用，宿主必须为 Web API 提供鉴权和 CSRF 防护；它不携带聊天事件，因此不会自动扣用户额度。通过 `generate_image(return_result=true)` 或 `generate_selfie(return_result=true)` 且传入事件上下文时，会沿用原权限和额度逻辑。
+
+配置页不会回显 API Key 原文，只显示掩码；保存时保留未修改的掩码项。单张参考图上限 20MB、单次最多 14 张且总计最多 64MB，具体 Provider 或端点可能有更低上限；副脑批量和后台任务也有硬上限。
 
 失败时同样返回 JSON（`success=false`、`images=[]`），便于调用方稳定解析；错误文本会自动脱敏 API Key、Bearer Token 和图片 Base64，避免把敏感信息透传给其他插件或聊天上下文。
 

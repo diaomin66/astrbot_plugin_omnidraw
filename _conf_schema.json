@@ -195,7 +195,7 @@
           "model": {
             "description": "当前模型",
             "type": "string",
-            "hint": "当前默认使用的模型名，应同时存在于下方模型池中。Gemini 官方模式可填 gemini-3.1-flash-image-preview。",
+            "hint": "当前默认使用的模型名，应同时存在于下方模型池中。Gemini 官方模式可填 gemini-3.1-flash-image。",
             "default": ""
           },
           "available_models": {
@@ -415,7 +415,7 @@
       "max_batch_count": {
         "description": "一次请求最多生成几组提示词",
         "type": "int",
-        "hint": "0 表示不启用批量扩写限制；需要副脑支持。",
+        "hint": "0 表示使用默认安全上限 10；可设置 1-10，超过 10 会自动按 10 处理。",
         "default": 0
       },
       "optimizer_custom_prompt": {
@@ -449,5 +449,30 @@
     "type": "bool",
     "hint": "开启后，/画、宏指令、/自拍 和 /视频 指令成功返回时会附带实际成功节点使用的模型名。",
     "default": false
+  },
+  "persona_name": {
+    "description": "旧版人设名称（兼容字段）",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "persona_base_prompt": {
+    "description": "旧版人设基础描述（兼容字段）",
+    "type": "text",
+    "default": "",
+    "invisible": true
+  },
+  "persona_ref_image": {
+    "description": "旧版人设参考图（兼容字段）",
+    "type": "file",
+    "default": [],
+    "file_types": ["png", "jpg", "jpeg", "webp", "gif"],
+    "invisible": true
+  },
+  "persona_ref_images": {
+    "description": "旧版人设参考图组（兼容字段）",
+    "type": "list",
+    "default": [],
+    "invisible": true
   }
 }

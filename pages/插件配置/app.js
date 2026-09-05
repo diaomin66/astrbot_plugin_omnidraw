@@ -13,7 +13,7 @@ const defaultCacheConfig = {
 };
 
 const GEMINI_OFFICIAL_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
-const GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-image-preview";
+const GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-image";
 const GEMINI_DEFAULT_MODELS = [GEMINI_DEFAULT_MODEL, "gemini-3-pro-image-preview"];
 
 const mockConfig = {
@@ -88,7 +88,7 @@ const bridge = window.AstrBotPluginPage || {
                 : mockConfig
     )),
     apiPost: async (name, payload) => {
-        console.info(`[OmniDraw local preview] ${name}`, payload);
+        console.info(`[OmniDraw local preview] ${name}`);
         return { success: true, stats: mockCacheStats, cleanup: { deleted_count: 0, human_deleted_size: "0 B" } };
     }
 };
@@ -121,6 +121,8 @@ let state = {
 let initialized = false;
 let savedSnapshot = "";
 let dirtyState = false;
+let usageRequestVersion = 0;
+let cacheRequestVersion = 0;
 
 function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -159,6 +161,15 @@ function normalizeModelList(value) {
 
 function normalizeTextAreaKeys(value) {
     return Array.isArray(value) ? value.join("\n") : String(value || "");
+}
+
+function maskApiKeyText(value) {
+    return normalizeTextAreaKeys(value)
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => item.startsWith("••••") ? item : `••••${item.length >= 4 ? item.slice(-4) : ""}`)
+        .join("\n");
 }
 
 function mergeUniqueModels(...groups) {
@@ -470,6 +481,17 @@ function setDirty(force) {
     if (saveState) saveState.textContent = isDirty ? "有未保存更改" : "配置已同步";
 }
 
+function uniqueProviderId(prefix, providers) {
+    const used = new Set((providers || []).map((provider) => String(provider.id || "").trim()));
+    let index = providers.length + 1;
+    let candidate = `${prefix}${index}`;
+    while (used.has(candidate)) {
+        index += 1;
+        candidate = `${prefix}${index}`;
+    }
+    return candidate;
+}
+
 function updateMetrics() {
     byId("metric-image-nodes").textContent = state.providers.length;
     byId("metric-video-nodes").textContent = state.video_providers.length;
@@ -528,8 +550,10 @@ function renderUsageStats() {
 }
 
 async function loadUsageStats(showToastOnSuccess = false) {
+    const requestVersion = ++usageRequestVersion;
     try {
         const res = await bridge.apiGet("get_usage_stats");
+        if (requestVersion !== usageRequestVersion) return;
         state.usage_stats = normalizeUsageStats(res?.stats || res || {});
         renderUsageStats();
         if (showToastOnSuccess) showToast("统计已刷新");
@@ -555,8 +579,10 @@ function renderCacheStats() {
 }
 
 async function loadCacheStats(showToastOnSuccess = false) {
+    const requestVersion = ++cacheRequestVersion;
     try {
         const res = await bridge.apiGet("get_cache_stats");
+        if (requestVersion !== cacheRequestVersion) return;
         state.cache_stats = normalizeCacheStats(res?.stats || res || {});
         renderCacheStats();
         if (showToastOnSuccess) showToast("缓存统计已刷新");
@@ -808,6 +834,8 @@ function renderPersonaImages() {
         wrapper.className = "image-preview-wrapper";
         const img = document.createElement("img");
         img.src = String(url || "");
+        img.referrerPolicy = "no-referrer";
+        img.loading = "lazy";
         img.className = "image-preview";
         img.alt = `Reference ${idx + 1}`;
         const button = document.createElement("button");
@@ -902,7 +930,7 @@ function renderProviderCard(p, i, isVideo) {
                 </div>
                 <div class="form-group">
                     <label>请求超时</label>
-                    <input type="number" class="input-glass" value="${escapeHtml(p.timeout)}" min="1" data-sync="${prefix}-time" data-index="${i}">
+                    <input type="number" class="input-glass" value="${escapeHtml(p.timeout)}" min="1" max="3600" data-sync="${prefix}-time" data-index="${i}">
                 </div>
                 <div class="form-group">
                     <label>默认尺寸</label>
@@ -982,8 +1010,8 @@ function readBasicFields() {
     state.optimizer_config.optimizer_style = byId("opt_style").value;
     state.optimizer_config.chain_optimizer = byId("opt_chain").value.trim();
     state.optimizer_config.optimizer_model = byId("opt_model").value.trim();
-    state.optimizer_config.optimizer_timeout = parseFloat(byId("opt_timeout").value) || 15;
-    state.optimizer_config.max_batch_count = parseInt(byId("opt_batch").value, 10) || 0;
+    state.optimizer_config.optimizer_timeout = Math.min(3600, Math.max(1, parseFloat(byId("opt_timeout").value) || 15));
+    state.optimizer_config.max_batch_count = Math.min(10, Math.max(0, parseInt(byId("opt_batch").value, 10) || 0));
     state.optimizer_config.optimizer_custom_prompt = byId("opt_custom").value;
     state.verbose_report = byId("verbose_report").checked;
     state.show_generation_time = byId("show_generation_time").checked;
@@ -1278,7 +1306,7 @@ function setupEventDelegation() {
         }
         if (act === "del-preset") animateDel("presets-container", state.presets, idx, renderPresets);
         if (act === "add-provider") {
-            state.providers.push({ id: `node_${state.providers.length + 1}`, api_type: "openai_image", base_url: "", model: "", available_models: [], api_keys: "", timeout: 60, default_size: "" });
+            state.providers.push({ id: uniqueProviderId("node_", state.providers), api_type: "openai_image", base_url: "", model: "", available_models: [], api_keys: "", timeout: 60, default_size: "" });
             renderProviders();
             renderSelectors();
             animateAdd("providers-container");
@@ -1286,7 +1314,7 @@ function setupEventDelegation() {
         }
         if (act === "del-provider") animateDel("providers-container", state.providers, idx, renderProviders, renderSelectors);
         if (act === "add-video-provider") {
-            state.video_providers.push({ id: `video_node_${state.video_providers.length + 1}`, api_type: "async_task", base_url: "", model: "", available_models: [], api_keys: "", timeout: 300, default_size: "" });
+            state.video_providers.push({ id: uniqueProviderId("video_node_", state.video_providers), api_type: "async_task", base_url: "", model: "", available_models: [], api_keys: "", timeout: 300, default_size: "" });
             renderVideoProviders();
             renderSelectors();
             animateAdd("video-providers-container");
@@ -1340,12 +1368,12 @@ function setupEventDelegation() {
         }
         if (s === "prov-id") state.providers[i].id = v;
         if (s === "prov-url") state.providers[i].base_url = v;
-        if (s === "prov-time") state.providers[i].timeout = parseFloat(v) || 60;
+        if (s === "prov-time") state.providers[i].timeout = Math.min(3600, Math.max(1, parseFloat(v) || 60));
         if (s === "prov-size") state.providers[i].default_size = v.trim();
         if (s === "prov-keys") state.providers[i].api_keys = v;
         if (s === "vid-id") state.video_providers[i].id = v;
         if (s === "vid-url") state.video_providers[i].base_url = v;
-        if (s === "vid-time") state.video_providers[i].timeout = parseFloat(v) || 300;
+        if (s === "vid-time") state.video_providers[i].timeout = Math.min(3600, Math.max(1, parseFloat(v) || 300));
         if (s === "vid-size") state.video_providers[i].default_size = v.trim();
         if (s === "vid-keys") state.video_providers[i].api_keys = v;
         setDirty();
@@ -1374,21 +1402,47 @@ function setupEventDelegation() {
     fileInput.addEventListener("change", (e) => {
         const files = Array.from(e.target.files || []);
         if (!files.length) return;
-        let loadedCount = 0;
         const activePersona = getActivePersona();
+        const currentCount = (activePersona.persona_ref_image || []).length;
+        const accepted = files.filter((file) => {
+            if (!String(file.type || "").toLowerCase().startsWith("image/")) {
+                showToast(`${file.name} 不是受支持的图片`, "error");
+                return false;
+            }
+            if (file.size > 20 * 1024 * 1024) {
+                showToast(`${file.name} 超过 20MB 限制`, "error");
+                return false;
+            }
+            return true;
+        }).slice(0, Math.max(0, 14 - currentCount));
+        if (!accepted.length) {
+            fileInput.value = "";
+            return;
+        }
+        let loadedCount = 0;
+        let addedCount = 0;
         activePersona.persona_ref_image ||= [];
-        files.forEach((file) => {
+        const finishRead = () => {
+            loadedCount += 1;
+            if (loadedCount !== accepted.length) return;
+            syncActivePersonaMirror();
+            renderPersonaImages();
+            renderPersonaProfiles();
+            if (addedCount) {
+                showToast(`已添加 ${addedCount} 张图片`);
+                setDirty();
+            }
+        };
+        accepted.forEach((file) => {
             const reader = new FileReader();
             reader.onload = (evt) => {
                 activePersona.persona_ref_image.push(evt.target.result);
-                loadedCount += 1;
-                if (loadedCount === files.length) {
-                    syncActivePersonaMirror();
-                    renderPersonaImages();
-                    renderPersonaProfiles();
-                    showToast(`已添加 ${files.length} 张图片`);
-                    setDirty();
-                }
+                addedCount += 1;
+                finishRead();
+            };
+            reader.onerror = () => {
+                showToast(`${file.name} 读取失败`, "error");
+                finishRead();
             };
             reader.readAsDataURL(file);
         });
@@ -1409,7 +1463,15 @@ async function saveConfig(btn) {
         const payload = buildPayload();
         const res = await bridge.apiPost("save_config", payload);
         if (res?.success) {
-            savedSnapshot = JSON.stringify(payload);
+            state.providers.forEach((provider) => {
+                provider.api_keys = maskApiKeyText(provider.api_keys);
+            });
+            state.video_providers.forEach((provider) => {
+                provider.api_keys = maskApiKeyText(provider.api_keys);
+            });
+            renderProviders();
+            renderVideoProviders();
+            savedSnapshot = JSON.stringify(buildPayload());
             setDirty(false);
             renderUsageStats();
             showToast("配置已保存");
@@ -1428,8 +1490,11 @@ async function saveConfig(btn) {
 }
 
 async function init() {
-    await bridge.ready();
-    const rawConfig = await bridge.apiGet("get_config") || {};
+    const content = document.querySelector(".content");
+    const pageStatus = byId("page-status");
+    try {
+        await bridge.ready();
+        const rawConfig = await bridge.apiGet("get_config") || {};
     const perm = rawConfig.permission_config || rawConfig;
     const pers = rawConfig.persona_config || rawConfig;
     const opt = rawConfig.optimizer_config || rawConfig;
@@ -1493,25 +1558,44 @@ async function init() {
     state.show_generation_time = Boolean(rawConfig.show_generation_time);
     state.show_request_model = Boolean(rawConfig.show_request_model);
 
-    bindBasicFields();
-    renderSelectors();
-    renderPersonaProfiles();
-    renderPresets();
-    renderProviders();
-    renderVideoProviders();
-    renderPersonaImages();
-    renderUsageStats();
-    renderCacheStats();
-    setupEventDelegation();
-    await loadUsageStats(false);
-    await loadCacheStats(false);
-    updateMetrics();
-    initialized = true;
-    savedSnapshot = JSON.stringify(buildPayload());
-    setDirty(false);
+        bindBasicFields();
+        renderSelectors();
+        renderPersonaProfiles();
+        renderPresets();
+        renderProviders();
+        renderVideoProviders();
+        renderPersonaImages();
+        renderUsageStats();
+        renderCacheStats();
+        setupEventDelegation();
+        await Promise.all([loadUsageStats(false), loadCacheStats(false)]);
+        updateMetrics();
+        initialized = true;
+        savedSnapshot = JSON.stringify(buildPayload());
+        setDirty(false);
+        content?.setAttribute("aria-busy", "false");
+        pageStatus?.querySelector("strong")?.replaceChildren("READY");
+        document.body.classList.remove("is-loading");
+    } catch (error) {
+        console.error(error);
+        content?.setAttribute("aria-busy", "false");
+        pageStatus?.querySelector("strong")?.replaceChildren("ERROR");
+        document.body.classList.remove("is-loading");
+        showToast("配置页初始化失败，请刷新后重试", "error");
+    }
 }
 
-init().catch((error) => {
-    console.error(error);
-    showToast("配置页初始化失败", "error");
+document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        document.querySelector('[data-action="save-config"]')?.click();
+    }
 });
+
+window.addEventListener("beforeunload", (event) => {
+    if (!dirtyState) return;
+    event.preventDefault();
+    event.returnValue = "";
+});
+
+init();

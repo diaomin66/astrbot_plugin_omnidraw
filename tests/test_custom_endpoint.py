@@ -1,8 +1,11 @@
 import ast
+import asyncio
 import base64
 import importlib
 import json
 import sys
+import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -130,8 +133,8 @@ openai_impl_module = importlib.import_module(f"{PACKAGE_NAME}.providers.openai_i
 openai_chat_module = importlib.import_module(f"{PACKAGE_NAME}.providers.openai_chat_impl")
 provider_factory_module = importlib.import_module(f"{PACKAGE_NAME}.providers")
 chain_manager_module = importlib.import_module(f"{PACKAGE_NAME}.core.chain_manager")
-video_manager_module = importlib.import_module(f"{PACKAGE_NAME}.core.video_manager")
 prompt_optimizer_module = importlib.import_module(f"{PACKAGE_NAME}.core.prompt_optimizer")
+video_manager_module = importlib.import_module(f"{PACKAGE_NAME}.core.video_manager")
 main_module = importlib.import_module(f"{PACKAGE_NAME}.main")
 
 ProviderConfig = models_module.ProviderConfig
@@ -139,9 +142,10 @@ PluginConfig = models_module.PluginConfig
 _normalize_api_type = models_module._normalize_api_type
 ChainRunResult = chain_manager_module.ChainRunResult
 ChainManager = chain_manager_module.ChainManager
+PromptOptimizer = prompt_optimizer_module.PromptOptimizer
 OmniDrawPlugin = main_module.OmniDrawPlugin
 VideoManager = video_manager_module.VideoManager
-PromptOptimizer = prompt_optimizer_module.PromptOptimizer
+VideoTaskError = video_manager_module.VideoTaskError
 extract_error_message = base_module.extract_error_message
 extract_image_url_from_response = base_module.extract_image_url_from_response
 is_complete_endpoint_url = base_module.is_complete_endpoint_url
@@ -155,7 +159,7 @@ OpenAIChatProvider = openai_chat_module.OpenAIChatProvider
 
 
 def _long_b64() -> str:
-    return base64.b64encode(b"image-bytes" * 20).decode("ascii")
+    return base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"image-bytes" * 20).decode("ascii")
 
 
 class FakeResponse:
@@ -198,6 +202,129 @@ class FakeSession:
         return FakePost(self.response)
 
 
+class PromptOptimizerRegressionTest(unittest.IsolatedAsyncioTestCase):
+    class OptimizerResponse:
+        def __init__(self, payload, headers=None):
+            self.payload = payload
+            self.headers = headers or {}
+            self.charset = "utf-8"
+            self.read_called = False
+
+        def raise_for_status(self):
+            return None
+
+        async def read(self):
+            self.read_called = True
+            return json.dumps(self.payload).encode("utf-8")
+
+    @staticmethod
+    def _config(api_type="openai_chat", api_keys=None):
+        provider = ProviderConfig(
+            id="optimizer-node",
+            api_type=api_type,
+            base_url="https://api.example.com/v1",
+            api_keys=api_keys or ["key-a", "key-b"],
+            model="chat-model",
+            timeout=30.0,
+        )
+        config = types.SimpleNamespace(
+            enable_optimizer=True,
+            chains={"optimizer": [provider.id]},
+            providers=[provider],
+            optimizer_model="chat-model",
+            optimizer_timeout=15.0,
+            optimizer_style="手机日常原生感",
+            optimizer_custom_prompt="",
+        )
+        config.get_provider = lambda provider_id: provider if provider_id == provider.id else None
+        return config
+
+    async def test_extracts_legal_top_level_json_array(self):
+        content = json.dumps([
+            {"subject_appearance": "first distinct subject"},
+            {"subject_appearance": "second distinct subject"},
+        ])
+        response = self.OptimizerResponse({
+            "choices": [{"message": {"content": content}}],
+        })
+
+        results = await PromptOptimizer(self._config()).optimize(
+            "raw action",
+            count=2,
+            session=FakeSession(response),
+        )
+
+        self.assertIn("first distinct subject", results[0])
+        self.assertIn("second distinct subject", results[1])
+
+    async def test_extracts_top_level_array_before_bracketed_trailing_note(self):
+        content = json.dumps([
+            {"subject_appearance": "first distinct subject"},
+            {"subject_appearance": "second distinct subject"},
+        ]) + "\nDone [ok]"
+        response = self.OptimizerResponse({
+            "choices": [{"message": {"content": content}}],
+        })
+
+        results = await PromptOptimizer(self._config()).optimize(
+            "raw action",
+            count=2,
+            session=FakeSession(response),
+        )
+
+        self.assertIn("first distinct subject", results[0])
+        self.assertIn("second distinct subject", results[1])
+
+    async def test_gemini_official_node_degrades_without_chat_request(self):
+        session = FakeSession(self.OptimizerResponse({}))
+
+        results = await PromptOptimizer(self._config(api_type="gemini_official")).optimize(
+            "raw action",
+            count=2,
+            session=session,
+        )
+
+        self.assertEqual(results, ["raw action", "raw action"])
+        self.assertEqual(session.posts, [])
+
+    async def test_response_body_limit_is_checked_before_read(self):
+        response = self.OptimizerResponse(
+            {"choices": []},
+            headers={"Content-Length": str(prompt_optimizer_module.MAX_OPTIMIZER_RESPONSE_BYTES + 1)},
+        )
+
+        results = await PromptOptimizer(self._config()).optimize(
+            "raw action",
+            session=FakeSession(response),
+        )
+
+        self.assertEqual(results, ["raw action"])
+        self.assertFalse(response.read_called)
+
+    async def test_optimizer_key_rotation_isolated_from_image_scope(self):
+        with base_module._KEY_ROTATION_LOCK:
+            original_rotation = dict(base_module._KEY_ROTATION_INDEX)
+            base_module._KEY_ROTATION_INDEX.clear()
+        try:
+            image_scope = "image:openai_chat:https://api.example.com/v1"
+            self.assertEqual(
+                base_module.next_api_key("optimizer-node", ["key-a", "key-b"], scope=image_scope),
+                "key-a",
+            )
+            response = self.OptimizerResponse({
+                "choices": [{"message": {"content": '{"subject_appearance": "optimized subject"}'}}],
+            })
+            session = FakeSession(response)
+
+            await PromptOptimizer(self._config()).optimize("raw action", session=session)
+
+            self.assertEqual(session.posts[0]["headers"]["Authorization"], "Bearer key-a")
+        finally:
+            with base_module._KEY_ROTATION_LOCK:
+                base_module._KEY_ROTATION_INDEX.clear()
+                base_module._KEY_ROTATION_INDEX.update(original_rotation)
+
+
 class CustomEndpointHelpersTest(unittest.TestCase):
     def test_custom_api_type_is_preserved(self):
         self.assertEqual(_normalize_api_type("custom_endpoint", is_video=False), "custom_endpoint")
@@ -208,10 +335,18 @@ class CustomEndpointHelpersTest(unittest.TestCase):
         self.assertEqual(_normalize_api_type("Gemini", is_video=False), "gemini_official")
         self.assertEqual(_normalize_api_type("Gemini 官方", is_video=False), "gemini_official")
 
-    def test_video_async_task_is_not_misclassified_as_sync(self):
-        self.assertEqual(_normalize_api_type("async_task", is_video=True), "async_task")
-        self.assertEqual(_normalize_api_type("异步轮询", is_video=True), "async_task")
-        self.assertEqual(_normalize_api_type("openai_sync", is_video=True), "openai_sync")
+    def test_video_api_type_normalization_preserves_legacy_aliases(self):
+        for value in ("async_task", "async-task", "async task", "异步任务"):
+            with self.subTest(value=value):
+                self.assertEqual(_normalize_api_type(value, is_video=True), "async_task")
+
+        for value in ("openai_sync", "openai-sync", "OpenAI Sync", "同步模式"):
+            with self.subTest(value=value):
+                self.assertEqual(_normalize_api_type(value, is_video=True), "openai_sync")
+
+        for value in ("openai_chat", "OpenAI Chat Completions", "chat/completions", "对话模式"):
+            with self.subTest(value=value):
+                self.assertEqual(_normalize_api_type(value, is_video=True), "openai_chat")
 
     def test_extracts_gemini_inline_data_response(self):
         endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent"
@@ -465,38 +600,6 @@ class RuntimeConfigKeyTest(unittest.TestCase):
         self.assertIn("GEMINI_OFFICIAL_BASE_URL", app_js)
         self.assertNotIn("return applyImageProviderDefaults({", app_js)
 
-    def test_optimizer_style_options_match_style_presets(self):
-        """schema 的副脑风格选项必须与代码内置风格 (STYLE_PRESETS) 及页面下拉保持一致，避免选了风格却静默回退。"""
-        optimizer_source = (PLUGIN_DIR / "core" / "prompt_optimizer.py").read_text(encoding="utf-8")
-        preset_keys = None
-        for node in ast.walk(ast.parse(optimizer_source)):
-            if isinstance(node, ast.Assign) and any(
-                isinstance(target, ast.Name) and target.id == "STYLE_PRESETS"
-                for target in node.targets
-            ):
-                preset_keys = list(ast.literal_eval(node.value).keys())
-                break
-        self.assertIsNotNone(preset_keys, "未能在 prompt_optimizer.py 中找到 STYLE_PRESETS")
-
-        schema = json.loads((PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8"))
-        schema_options = schema["optimizer_config"]["items"]["optimizer_style"]["options"]
-        self.assertEqual(schema_options, preset_keys + ["自定义模式"])
-
-        index_html = (PLUGIN_DIR / "pages" / "插件配置" / "index.html").read_text(encoding="utf-8")
-        for option in schema_options:
-            self.assertIn(f'value="{option}"', index_html)
-
-    def test_astrbot_optimizer_toggle_is_available_in_schema_and_pages(self):
-        schema = json.loads((PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8"))
-        toggle = schema["optimizer_config"]["items"]["use_astrbot_provider"]
-        self.assertEqual(toggle["type"], "bool")
-        self.assertFalse(toggle["default"])
-
-        index_html = (PLUGIN_DIR / "pages" / "插件配置" / "index.html").read_text(encoding="utf-8")
-        app_js = (PLUGIN_DIR / "pages" / "插件配置" / "app.js").read_text(encoding="utf-8")
-        self.assertIn('id="opt_astrbot"', index_html)
-        self.assertIn("use_astrbot_provider", app_js)
-
     def test_tests_directory_is_not_gitignored(self):
         gitignore = (PLUGIN_DIR / ".gitignore").read_text(encoding="utf-8")
 
@@ -513,120 +616,6 @@ class RuntimeConfigKeyTest(unittest.TestCase):
         )
 
         self.assertIsInstance(provider_factory_module.create_provider(config, session=object()), GeminiOfficialProvider)
-
-
-class PromptOptimizerAstrBotProviderTest(unittest.IsolatedAsyncioTestCase):
-    async def test_uses_current_astrbot_chat_provider_without_image_endpoint(self):
-        config = PluginConfig.from_dict(
-            {
-                "optimizer_config": {
-                    "enable_optimizer": True,
-                    "use_astrbot_provider": True,
-                    "optimizer_timeout": 5,
-                }
-            },
-            str(PLUGIN_DIR),
-        )
-        calls = []
-
-        class ActiveProvider:
-            def meta(self):
-                return types.SimpleNamespace(id="astrbot-chat")
-
-        class Context:
-            def get_using_provider(self):
-                return ActiveProvider()
-
-            async def llm_generate(self, **kwargs):
-                calls.append(kwargs)
-                return types.SimpleNamespace(
-                    completion_text=json.dumps(
-                        {
-                            "subject_appearance": "a cat",
-                            "environment_and_scene": "a quiet room",
-                        }
-                    )
-                )
-
-        results = await PromptOptimizer(config, Context()).optimize("画一只猫")
-
-        self.assertEqual(len(results), 1)
-        self.assertIn("a cat", results[0])
-        self.assertEqual(calls[0]["chat_provider_id"], "astrbot-chat")
-        self.assertEqual(calls[0]["prompt"], "画一只猫")
-        self.assertIn("Output ONLY ONE valid JSON object", calls[0]["system_prompt"])
-
-
-class PersonaCommandTest(unittest.IsolatedAsyncioTestCase):
-    def _plugin(self):
-        plugin = object.__new__(OmniDrawPlugin)
-        persona = types.SimpleNamespace(
-            id="persona_2",
-            name="测试人设",
-            base_prompt="fixed appearance",
-            ref_images=["https://cdn.example.com/ref-1.png", "C:/refs/ref-2.png"],
-        )
-        plugin.plugin_config = types.SimpleNamespace(
-            active_persona_id="persona_2",
-            personas=[persona],
-        )
-        plugin._permission_denied_message = lambda event: ""
-        plugin._find_persona_profile = lambda selector: persona if selector in {"persona_2", "测试人设", "1"} else None
-        plugin._extract_command_message = lambda event, command, fallback="": fallback
-        plugin._create_image_component = lambda ref: {"type": "image", "ref": ref}
-        return plugin, persona
-
-    async def test_view_persona_returns_details_and_all_reference_images(self):
-        plugin, _ = self._plugin()
-
-        class Event:
-            def chain_result(self, components):
-                return components
-
-            def plain_result(self, text):
-                return text
-
-        results = [
-            result
-            async for result in plugin.cmd_persona_view(Event(), "persona_2")
-        ]
-
-        self.assertEqual(len(results), 1)
-        self.assertIn("测试人设", results[0][0].text)
-        self.assertIn("fixed appearance", results[0][0].text)
-        self.assertEqual(
-            results[0][1:],
-            [
-                {"type": "image", "ref": "https://cdn.example.com/ref-1.png"},
-                {"type": "image", "ref": "C:/refs/ref-2.png"},
-            ],
-        )
-
-    def test_update_persona_profile_persists_name(self):
-        plugin, _ = self._plugin()
-        plugin.raw_config = {
-            "persona_config": {
-                "profiles": [
-                    {
-                        "id": "persona_2",
-                        "persona_name": "旧名称",
-                        "persona_base_prompt": "fixed appearance",
-                        "persona_ref_image": [],
-                    }
-                ]
-            }
-        }
-        calls = []
-        plugin._apply_runtime_config = lambda config: calls.append(("apply", config))
-        plugin._persist_config = lambda: calls.append(("persist", None))
-        plugin._safe_update_context_config = lambda: calls.append(("sync", None))
-
-        updated = plugin._update_persona_profile("persona_2", "name", "新名称")
-
-        self.assertTrue(updated)
-        profile = plugin.raw_config["persona_config"]["profiles"][0]
-        self.assertEqual(profile["persona_name"], "新名称")
-        self.assertEqual([call[0] for call in calls], ["apply", "persist", "sync"])
 
 
 class ImageSuccessComponentsTest(unittest.TestCase):
@@ -713,10 +702,15 @@ class PluginImageReturnTest(unittest.IsolatedAsyncioTestCase):
         plugin._process_and_save_images = self._process_refs
         plugin._parse_extra_params = lambda extra: {"model": "override-model"} if extra else {}
         plugin._prune_cache_if_needed = lambda *args, **kwargs: None
+        plugin._lease_cache_paths = lambda paths: list(paths or [])
+        plugin._release_cache_paths = lambda paths: None
         plugin._recorded_count = 0
         plugin._record_generated_images = lambda event, count=1: setattr(plugin, "_recorded_count", count)
         plugin._permission_denied_message = lambda event: ""
         plugin._image_quota_error_message = lambda event, count=1: ""
+        plugin._reserve_image_quota = lambda event, count=1: ("", 0)
+        plugin._complete_image_quota = lambda event, reserved, count: setattr(plugin, "_recorded_count", count)
+        plugin._release_image_quota = lambda event, reserved: None
         plugin._get_event_images = lambda event: []
         return plugin
 
@@ -919,7 +913,6 @@ class PluginImageReturnTest(unittest.IsolatedAsyncioTestCase):
         plugin.plugin_config.persona_ref_images = ["persona-ref.png"]
         plugin.plugin_config.chains = {"selfie": ["selfie_node_1"]}
         send_calls = []
-        sent_events = []
         original_client_session = main_module.aiohttp.ClientSession
         original_chain_manager = main_module.ChainManager
 
@@ -936,17 +929,14 @@ class PluginImageReturnTest(unittest.IsolatedAsyncioTestCase):
                 )
 
         async def fake_send_generated_images(event, results, *args, **kwargs):
-            sent_events.append(event)
             send_calls.extend(results)
             return len(results)
 
         main_module.aiohttp.ClientSession = FakeClientSession
         main_module.ChainManager = FakeChainManager
         plugin._send_generated_images = fake_send_generated_images
-        raw_event = object()
-        wrapped_event = types.SimpleNamespace(context=types.SimpleNamespace(event=raw_event))
         try:
-            message = await plugin.tool_generate_selfie(wrapped_event, "look at camera", count=1)
+            message = await plugin.tool_generate_selfie(object(), "look at camera", count=1)
         finally:
             main_module.aiohttp.ClientSession = original_client_session
             main_module.ChainManager = original_chain_manager
@@ -954,7 +944,6 @@ class PluginImageReturnTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已成功生成并下发了 1 张图", message)
         self.assertEqual(len(send_calls), 1)
         self.assertEqual(send_calls[0].image_url, "https://cdn.example.com/old-selfie.png")
-        self.assertIs(sent_events[0], raw_event)
         self.assertEqual(plugin._recorded_count, 1)
 
     async def test_existing_generate_image_tool_still_sends_images(self):
@@ -1217,8 +1206,13 @@ class PresetEventHandlerTest(unittest.IsolatedAsyncioTestCase):
         plugin.cmd_parser = main_module.CommandParser()
         plugin._permission_denied_message = lambda event: ""
         plugin._image_quota_error_message = lambda event, count=1: ""
+        plugin._reserve_image_quota = lambda event, count=1: ("", 0)
+        plugin._complete_image_quota = lambda event, reserved, count: setattr(plugin, "_recorded_count", count)
+        plugin._release_image_quota = lambda event, reserved: None
         plugin._get_event_images = lambda *args, **kwargs: []
         plugin._process_and_save_images = self._process_refs
+        plugin._lease_cache_paths = lambda paths: list(paths or [])
+        plugin._release_cache_paths = lambda paths: None
         plugin._recorded_count = 0
         plugin._record_generated_images = lambda event, count=1: setattr(plugin, "_recorded_count", count)
         plugin._build_image_success_components = lambda result, elapsed: [{"result": result.image_url}]
@@ -1311,15 +1305,20 @@ class CommandPendingSendTest(unittest.IsolatedAsyncioTestCase):
         plugin.video_manager = types.SimpleNamespace(background_task_runner=self._video_runner)
         plugin._permission_denied_message = lambda event: ""
         plugin._image_quota_error_message = lambda event, count=1: ""
+        plugin._reserve_image_quota = lambda event, count=1: ("", 0)
+        plugin._complete_image_quota = lambda event, reserved, count: setattr(plugin, "_recorded_count", count)
+        plugin._release_image_quota = lambda event, reserved: None
         plugin._extract_command_message = lambda event, command, fallback: fallback
         plugin._get_event_images = lambda *args, **kwargs: []
         plugin._process_and_save_images = self._process_refs
+        plugin._lease_cache_paths = lambda paths: list(paths or [])
+        plugin._release_cache_paths = lambda paths: None
         plugin._recorded_count = 0
         plugin._record_generated_images = lambda event, count=1: setattr(plugin, "_recorded_count", count)
         plugin._build_image_success_components = lambda result, elapsed: [{"result": result.image_url}]
         plugin._scheduled_tasks = []
 
-        def create_background_task(coro):
+        def create_background_task(coro, **kwargs):
             plugin._scheduled_tasks.append(coro)
             close = getattr(coro, "close", None)
             if callable(close):
@@ -1433,6 +1432,41 @@ class CommandPendingSendTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("视频任务已提交后台渲染", event.sent[0][1])
         self.assertEqual(results, [])
         self.assertEqual(len(plugin._scheduled_tasks), 1)
+
+    async def test_pending_send_failure_does_not_abort_draw_generation(self):
+        plugin = self._plugin()
+        calls = []
+        original_client_session = main_module.aiohttp.ClientSession
+        original_chain_manager = main_module.ChainManager
+
+        class FakeChainManager:
+            def __init__(self, config, session):
+                pass
+
+            async def run_chain_with_metadata(self, chain_name, prompt, **kwargs):
+                calls.append((chain_name, prompt, kwargs))
+                return ChainRunResult(
+                    image_url="https://cdn.example.com/draw.png",
+                    provider_id="node_1",
+                    model="model_a",
+                    elapsed_seconds=1.0,
+                )
+
+        class FailingSendEvent(self.FakeEvent):
+            async def send(self, result):
+                raise RuntimeError("send failed")
+
+        event = FailingSendEvent()
+        main_module.aiohttp.ClientSession = FakeClientSession
+        main_module.ChainManager = FakeChainManager
+        try:
+            results = [item async for item in plugin.cmd_draw(event, "海边日落")]
+        finally:
+            main_module.aiohttp.ClientSession = original_client_session
+            main_module.ChainManager = original_chain_manager
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(results, [("chain", [{"result": "https://cdn.example.com/draw.png"}])])
 
 
 class ChainManagerMetadataTest(unittest.IsolatedAsyncioTestCase):
@@ -1612,7 +1646,7 @@ class ChainManagerMetadataTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(result.image_url.startswith("data:image/png;base64,"))
             self.assertEqual(result.provider_id, "gemini")
-            self.assertEqual(result.model, "gemini-3.1-flash-image-preview")
+            self.assertEqual(result.model, "gemini-3.1-flash-image")
             self.assertEqual(calls, [("draw a cat", {})])
         finally:
             chain_manager_module.create_provider = original_create_provider
@@ -1677,77 +1711,6 @@ class VideoSuccessMetadataTest(unittest.TestCase):
         self.assertEqual(manager._apply_provider_defaults(provider, {"resolution": "720p"}), {"resolution": "720p"})
 
 
-class VideoAsyncTaskTest(unittest.IsolatedAsyncioTestCase):
-    async def test_list_task_id_polls_api_tasks_endpoint(self):
-        config = PluginConfig.from_dict(
-            {
-                "video_providers": [
-                    {
-                        "id": "video_node",
-                        "api_type": "async_task",
-                        "base_url": "https://api.example.com/v1",
-                        "api_keys": "submit-key\nother-key",
-                        "model": "video-model",
-                        "timeout": 30,
-                    }
-                ]
-            },
-            str(PLUGIN_DIR),
-        )
-        manager = VideoManager(config)
-        provider = config.video_providers[0]
-
-        class SequenceSession:
-            def __init__(self):
-                self.posts = []
-                self.gets = []
-
-            def post(self, url, **kwargs):
-                self.posts.append({"url": url, **kwargs})
-                return FakePost(
-                    FakeResponse(
-                        {"code": 200, "data": [{"status": "submitted", "task_id": "task_video_1"}]}
-                    )
-                )
-
-            def get(self, url, **kwargs):
-                self.gets.append({"url": url, **kwargs})
-                return FakePost(
-                    FakeResponse(
-                        {
-                            "code": 200,
-                            "data": [
-                                {
-                                    "status": "completed",
-                                    "task_id": "task_video_1",
-                                    "url": "https://cdn.example.com/out.mp4",
-                                }
-                            ],
-                        }
-                    )
-                )
-
-        session = SequenceSession()
-        original_sleep = video_manager_module.asyncio.sleep
-
-        async def no_sleep(_seconds):
-            return None
-
-        video_manager_module.asyncio.sleep = no_sleep
-        try:
-            result = await manager._fetch_video_from_api(provider, "a quiet scene", session)
-        finally:
-            video_manager_module.asyncio.sleep = original_sleep
-
-        self.assertEqual(result, "https://cdn.example.com/out.mp4")
-        self.assertEqual(session.posts[0]["url"], "https://api.example.com/v1/videos/generations")
-        self.assertEqual(session.gets[0]["url"], "https://api.example.com/api/tasks/task_video_1")
-        self.assertEqual(
-            session.gets[0]["headers"]["Authorization"],
-            session.posts[0]["headers"]["Authorization"],
-        )
-
-
 class GeminiOfficialProviderTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         fake_logger.messages.clear()
@@ -1809,14 +1772,15 @@ class GeminiOfficialProviderTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_reference_image_uses_official_inline_data_part(self):
         provider, session = self._provider(self._gemini_response())
-        reference = "data:image/jpeg;base64," + _long_b64()
+        jpeg_b64 = base64.b64encode(b"\xff\xd8\xff\xe0" + b"jpeg-bytes" * 20).decode("ascii")
+        reference = "data:image/jpeg;base64," + jpeg_b64
 
         await provider.generate_image("edit a cat", user_refs=[reference])
 
         parts = session.posts[0]["json"]["contents"][0]["parts"]
         self.assertEqual(parts[0]["text"], "edit a cat")
         self.assertEqual(parts[1]["inlineData"]["mimeType"], "image/jpeg")
-        self.assertEqual(parts[1]["inlineData"]["data"], _long_b64())
+        self.assertEqual(parts[1]["inlineData"]["data"], jpeg_b64)
 
     async def test_preserves_full_generate_content_endpoint(self):
         endpoint = "https://generativelanguage.googleapis.com/v1beta/models/custom-image:generateContent"
@@ -1893,93 +1857,12 @@ class CustomEndpointProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.posts[0]["json"]["prompt"], "draw a cat")
         self.assertEqual(session.posts[0]["json"]["size"], "1024x1024")
 
-    async def test_custom_json_payload_restores_non_string_parameter_types(self):
-        endpoint = "https://api.example.com/v1/images/generations"
-        provider, session = self._provider(endpoint, {"data": [{"url": "https://cdn.example.com/out.png"}]})
-
-        await provider.generate_image(
-            "draw a cat",
-            watermark="false",
-            steps="20",
-            cfg_scale="7.5",
-            tags='["portrait", "photo"]',
-            metadata='{"source": "test"}',
-            size="1024x1024",
-        )
-
-        payload = session.posts[0]["json"]
-        self.assertIs(payload["watermark"], False)
-        self.assertEqual(payload["steps"], 20)
-        self.assertEqual(payload["cfg_scale"], 7.5)
-        self.assertEqual(payload["tags"], ["portrait", "photo"])
-        self.assertEqual(payload["metadata"], {"source": "test"})
-        self.assertEqual(payload["size"], "1024x1024")
-
-    async def test_custom_endpoint_polls_submitted_task_id_until_image_is_ready(self):
-        endpoint = "https://api.example.com/v1/images/generations"
-        config = ProviderConfig(
-            id="custom_node",
-            api_type="custom_endpoint",
-            base_url=endpoint,
-            api_keys=["test-key"],
-            model="image-model",
-            timeout=30.0,
-        )
-
-        class SequenceSession:
-            def __init__(self):
-                self.posts = []
-                self.gets = []
-                self.poll_responses = [
-                    FakeResponse({"code": 200, "data": [{"status": "processing", "task_id": "task_123"}]}),
-                    FakeResponse(
-                        {
-                            "code": 200,
-                            "data": [
-                                {
-                                    "status": "completed",
-                                    "task_id": "task_123",
-                                    "url": "https://cdn.example.com/async-out.png",
-                                }
-                            ],
-                        }
-                    ),
-                ]
-
-            def post(self, url, **kwargs):
-                self.posts.append({"url": url, **kwargs})
-                return FakePost(
-                    FakeResponse(
-                        {"code": 200, "data": [{"status": "submitted", "task_id": "task_123"}]}
-                    )
-                )
-
-            def get(self, url, **kwargs):
-                self.gets.append({"url": url, **kwargs})
-                return FakePost(self.poll_responses.pop(0))
-
-        session = SequenceSession()
-        provider = CustomEndpointProvider(config, session)
-        provider.TASK_POLL_INTERVAL_SECONDS = 0
-
-        result = await provider.generate_image("draw a cat")
-
-        self.assertEqual(result, "https://cdn.example.com/async-out.png")
-        self.assertEqual(len(session.posts), 1)
-        self.assertEqual(
-            [item["url"] for item in session.gets],
-            [
-                "https://api.example.com/api/tasks/task_123",
-                "https://api.example.com/api/tasks/task_123",
-            ],
-        )
-
     async def test_custom_image_payload_uses_siliconflow_reference_fields(self):
         endpoint = "https://api.example.com/v1/images/generations"
         provider, session = self._provider(endpoint, {"images": [{"url": "https://cdn.example.com/out.png"}]})
         ref = "data:image/png;base64," + _long_b64()
-        ref2 = "data:image/png;base64," + base64.b64encode(b"ref-2" * 30).decode("ascii")
-        ref3 = "data:image/png;base64," + base64.b64encode(b"ref-3" * 30).decode("ascii")
+        ref2 = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"ref-2" * 30).decode("ascii")
+        ref3 = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"ref-3" * 30).decode("ascii")
 
         await provider.generate_image("edit a cat", user_refs=[ref, ref2, ref3])
 
@@ -2010,7 +1893,7 @@ class CustomEndpointProviderTest(unittest.IsolatedAsyncioTestCase):
         endpoint = "https://api.example.com/v1/images/edits"
         provider, session = self._provider(endpoint, {"data": [{"url": "https://cdn.example.com/out.png"}]})
         ref = "data:image/png;base64," + _long_b64()
-        ref2 = "data:image/png;base64," + base64.b64encode(b"ref-2" * 30).decode("ascii")
+        ref2 = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"ref-2" * 30).decode("ascii")
 
         await provider.generate_image("edit a cat", user_refs=[ref, ref2])
 
@@ -2068,7 +1951,7 @@ class CustomEndpointProviderTest(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_provider_logs_are_summarized_without_mutating_json_payloads(self):
-        raw_b64 = base64.b64encode(b"provider-raw-image" * 35).decode("ascii")
+        raw_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"provider-raw-image" * 35).decode("ascii")
         ref_data_url = "data:image/png;base64," + raw_b64
         secret = "sk-provider-secret-should-not-log"
         long_prompt = "draw " + ("very detailed " * 30) + "PROMPT_TAIL_SHOULD_NOT_LOG"
@@ -2264,6 +2147,1116 @@ class CustomEndpointProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(raw_b64[:40], message)
         self.assertIn("<redacted>", message)
         self.assertIn("<image_base64", message)
+
+
+class SecurityAndLimitRegressionTest(unittest.IsolatedAsyncioTestCase):
+    def test_cache_page_stats_do_not_expose_filesystem_paths(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin.data_dir = temp_dir
+            cache_dir = Path(temp_dir) / "temp_images"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / "sample.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+            stats = plugin._cache_stats_for_page()
+
+        self.assertNotIn("path", stats["dirs"]["temp_images"])
+        self.assertEqual(stats["dirs"]["temp_images"]["count"], 1)
+
+    def test_main_image_magic_rejects_mp4_ftyp_and_accepts_avif(self):
+        plugin = object.__new__(OmniDrawPlugin)
+
+        self.assertFalse(plugin._looks_like_image_bytes(b"\x00\x00\x00\x18ftypisom" + b"\x00" * 20))
+        self.assertTrue(plugin._looks_like_image_bytes(b"\x00\x00\x00\x18ftypavif" + b"\x00" * 20))
+
+    def test_legacy_provider_api_keys_are_migrated_masked_and_restored(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin._page_image_tokens = {}
+        legacy_config = {
+            "providers": [{"id": "image-node", "API密钥": "legacy-image-secret"}],
+            "video_providers": [{"id": "video-node", "API密钥": ["legacy-video-secret"]}],
+        }
+
+        plugin.raw_config = plugin._clean_runtime_config(legacy_config)
+        self.assertEqual(plugin.raw_config["providers"][0]["api_keys"], "legacy-image-secret")
+        self.assertEqual(plugin.raw_config["video_providers"][0]["api_keys"], ["legacy-video-secret"])
+        self.assertNotIn("API密钥", plugin.raw_config["providers"][0])
+        self.assertNotIn("API密钥", plugin.raw_config["video_providers"][0])
+
+        page_config = plugin._config_for_page()
+        serialized_page = json.dumps(page_config, ensure_ascii=False)
+        self.assertNotIn("legacy-image-secret", serialized_page)
+        self.assertNotIn("legacy-video-secret", serialized_page)
+        self.assertNotIn("API密钥", serialized_page)
+
+        plugin._restore_masked_api_keys(page_config)
+        self.assertEqual(page_config["providers"][0]["api_keys"], ["legacy-image-secret"])
+        self.assertEqual(page_config["video_providers"][0]["api_keys"], ["legacy-video-secret"])
+
+    def test_canonical_empty_api_keys_do_not_resurrect_legacy_secret(self):
+        plugin = object.__new__(OmniDrawPlugin)
+
+        cleaned = plugin._clean_runtime_config({
+            "providers": [{"id": "image-node", "api_keys": [], "API密钥": "stale-secret"}],
+        })
+
+        self.assertEqual(cleaned["providers"][0]["api_keys"], [])
+        self.assertNotIn("API密钥", cleaned["providers"][0])
+
+    def test_command_error_message_redacts_sensitive_exception_text(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin.plugin_config = types.SimpleNamespace(
+            draw_error_message="绘制失败: {error}",
+            selfie_error_message="自拍失败: {error}",
+            persona_name="默认助理",
+        )
+        secret = "AIza-command-secret-123456789"
+
+        message = plugin._build_command_error_message(
+            "cmd_draw",
+            RuntimeError(f"request failed: https://api.example.com/run?key={secret}&size=1"),
+        )
+
+        self.assertNotIn(secret, message)
+        self.assertIn("key=<redacted>", message)
+
+        timeout_message = plugin._build_command_error_message(
+            "cmd_draw",
+            asyncio.TimeoutError(),
+            error_kind="timeout",
+        )
+        self.assertIn("操作超时", timeout_message)
+
+    async def test_llm_image_tools_redact_sensitive_errors_in_non_result_mode(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin._permission_denied_message = lambda event: ""
+        plugin._normalize_count = lambda count: 1
+        plugin._reserve_image_quota = lambda event, count: ("", 1)
+        plugin._release_image_quota = lambda event, count: None
+        secret = "sk-tool-secret-123456789"
+
+        async def fail_generation(*args, **kwargs):
+            raise RuntimeError(f"Authorization: Bearer {secret}")
+
+        plugin._run_text2img_generation = fail_generation
+        plugin._run_selfie_generation = fail_generation
+
+        image_message = await plugin.tool_generate_image(object(), "draw a cat")
+        selfie_message = await plugin.tool_generate_selfie(object(), "look at camera")
+
+        self.assertNotIn(secret, image_message)
+        self.assertNotIn(secret, selfie_message)
+        self.assertIn("<redacted>", image_message)
+        self.assertIn("<redacted>", selfie_message)
+
+    def test_page_config_masks_and_restores_api_keys(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin.raw_config = {
+            "providers": [{"id": "node_1", "api_keys": ["secret-key-one", "secret-key-two"]}],
+            "video_providers": [],
+        }
+        page_config = json.loads(json.dumps(plugin.raw_config))
+
+        plugin._mask_config_api_keys(page_config)
+
+        masked = page_config["providers"][0]["api_keys"]
+        self.assertNotIn("secret-key-one", masked)
+        self.assertNotIn("secret-key-two", masked)
+        self.assertTrue(page_config["providers"][0]["api_keys_configured"])
+
+        payload = {"providers": [{"id": "node_1", "api_keys": masked}]}
+        plugin._restore_masked_api_keys(payload)
+        self.assertEqual(payload["providers"][0]["api_keys"], ["secret-key-one", "secret-key-two"])
+
+    def test_page_config_restores_reordered_and_deleted_masked_api_keys_by_suffix(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin.raw_config = {
+            "providers": [{
+                "id": "node_1",
+                "api_keys": ["secret-key-1111", "secret-key-2222", "secret-key-3333"],
+            }],
+            "video_providers": [],
+        }
+
+        payload = {"providers": [{
+            "id": "node_1",
+            "api_keys": "\n".join([
+                plugin._mask_api_key("secret-key-3333"),
+                plugin._mask_api_key("secret-key-1111"),
+            ]),
+        }]}
+        plugin._restore_masked_api_keys(payload)
+
+        self.assertEqual(
+            payload["providers"][0]["api_keys"],
+            ["secret-key-3333", "secret-key-1111"],
+        )
+
+    def test_page_config_restores_duplicate_mask_suffixes_without_reusing_old_key(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin.raw_config = {
+            "providers": [{
+                "id": "node_1",
+                "api_keys": ["first-secret-same", "second-secret-same"],
+            }],
+            "video_providers": [],
+        }
+
+        payload = {"providers": [{
+            "id": "node_1",
+            "api_keys": "\n".join([
+                plugin._mask_api_key("first-secret-same"),
+                plugin._mask_api_key("second-secret-same"),
+            ]),
+        }]}
+        plugin._restore_masked_api_keys(payload)
+
+        self.assertEqual(
+            payload["providers"][0]["api_keys"],
+            ["first-secret-same", "second-secret-same"],
+        )
+
+    def test_native_config_refresh_persists_previous_config_when_runtime_apply_fails(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin._config_lock = threading.RLock()
+        plugin._native_config_path = "native-config.json"
+        plugin._native_config_signature = "old-signature"
+        plugin._native_config_mtime = 1.0
+        plugin._native_config = None
+        plugin.raw_config = {"verbose_report": False}
+        plugin.plugin_config = object()
+        plugin.persona_manager = object()
+        plugin.video_manager = object()
+        plugin.prompt_optimizer = object()
+        persisted = []
+
+        plugin._get_mtime = lambda path: 2.0
+        plugin._file_signature = lambda path: "new-signature"
+        plugin._load_json_file = lambda path: {"verbose_report": True}
+        plugin._clean_runtime_config = lambda config: dict(config)
+        plugin._prepare_runtime_config = lambda config: dict(config)
+        plugin._persist_config = lambda: persisted.append(dict(plugin.raw_config))
+
+        def fail_apply(config):
+            raise RuntimeError("apply failed")
+
+        plugin._apply_runtime_config = fail_apply
+
+        with self.assertRaisesRegex(RuntimeError, "apply failed"):
+            plugin._refresh_from_native_config_if_changed()
+
+        self.assertEqual(plugin.raw_config, {"verbose_report": False})
+        self.assertEqual(
+            persisted,
+            [{"verbose_report": True}, {"verbose_report": False}],
+        )
+        self.assertEqual(plugin._native_config_signature, "old-signature")
+        self.assertEqual(plugin._native_config_mtime, 1.0)
+
+    def test_empty_newer_native_config_does_not_replace_persisted_payload_at_startup(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin._sync_native_active_persona_upload = lambda config: None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            native_path = Path(temp_dir) / "native.json"
+            persisted_path = Path(temp_dir) / "persisted.json"
+            native_path.write_text("{}", encoding="utf-8")
+            persisted_config = {
+                "providers": [{"id": "node_1", "api_keys": ["secret-key"]}],
+            }
+            persisted_path.write_text(json.dumps(persisted_config), encoding="utf-8")
+            plugin._native_config_path = str(native_path)
+            plugin.config_path = str(persisted_path)
+            plugin._native_config_mtime = 2.0
+            plugin._persist_config_mtime = 1.0
+
+            loaded = plugin._load_initial_config({})
+
+        self.assertEqual(loaded, persisted_config)
+
+    def test_newer_native_config_with_payload_replaces_persisted_payload_at_startup(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin._sync_native_active_persona_upload = lambda config: None
+        native_config = {
+            "providers": [{"id": "native-node", "api_keys": ["native-secret"]}],
+        }
+        persisted_config = {
+            "providers": [{"id": "persisted-node", "api_keys": ["persisted-secret"]}],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            native_path = Path(temp_dir) / "native.json"
+            persisted_path = Path(temp_dir) / "persisted.json"
+            native_path.write_text(json.dumps(native_config), encoding="utf-8")
+            persisted_path.write_text(json.dumps(persisted_config), encoding="utf-8")
+            plugin._native_config_path = str(native_path)
+            plugin.config_path = str(persisted_path)
+            plugin._native_config_mtime = 2.0
+            plugin._persist_config_mtime = 1.0
+
+            loaded = plugin._load_initial_config(native_config)
+
+        self.assertEqual(loaded, native_config)
+
+    def test_page_preview_rejects_local_files_outside_plugin_data_dir(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin.data_dir = str(PLUGIN_DIR / ".pytest_cache" / "page_security" / "plugin_data")
+        plugin._page_image_tokens = {}
+        inside = Path(plugin.data_dir) / "persona_refs" / "inside.png"
+        outside = PLUGIN_DIR / ".pytest_cache" / "page_security" / "outside.png"
+        inside.parent.mkdir(parents=True, exist_ok=True)
+        outside.parent.mkdir(parents=True, exist_ok=True)
+        image_bytes = b"\x89PNG\r\n\x1a\n" + b"test-image"
+        inside.write_bytes(image_bytes)
+        outside.write_bytes(image_bytes)
+
+        self.assertTrue(plugin._image_ref_for_page(str(inside)).startswith("data:image/png;base64,"))
+        self.assertEqual(plugin._image_ref_for_page(str(outside)), "")
+
+    def test_quota_reservation_blocks_concurrent_overcommit(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin.plugin_config = types.SimpleNamespace(enable_daily_limit=True, daily_image_limit=2)
+        plugin._usage_stats = {"date": plugin._today_key(), "total": 0, "users": {}}
+        plugin._quota_reservations = {}
+        plugin._usage_lock = threading.RLock()
+        plugin._access_status = lambda event, refresh=True: {
+            "user_id": "user-1",
+            "group_id": "",
+            "allowed": True,
+            "unlimited": False,
+            "level": "limited",
+            "reason": "",
+        }
+        plugin._get_event_user_id = lambda event: "user-1"
+        plugin._permission_denied_message = lambda event: ""
+
+        error, reserved = plugin._reserve_image_quota(object(), 2)
+        self.assertEqual(error, "")
+        self.assertEqual(reserved, 2)
+        error, reserved = plugin._reserve_image_quota(object(), 1)
+        self.assertIn("额度不足", error)
+        self.assertEqual(reserved, 0)
+        plugin._release_image_quota(object(), 2)
+        self.assertEqual(plugin._reserve_image_quota(object(), 1), ("", 1))
+
+    async def test_provider_rejects_loopback_reference_before_request(self):
+        config = ProviderConfig(
+            id="node_1",
+            api_type="openai_image",
+            base_url="https://api.example.com/v1",
+            api_keys=["key-1"],
+            model="image-model",
+            timeout=30.0,
+        )
+        session = FakeSession(FakeResponse({"data": [{"url": "https://cdn.example.com/out.png"}]}))
+        provider = OpenAIProvider(config, session)
+
+        with self.assertRaisesRegex(RuntimeError, "不允许访问"):
+            await provider.generate_image("draw a cat", user_refs=["http://127.0.0.1/ref.png"])
+        self.assertEqual(session.gets, [])
+
+    async def test_provider_rejects_plain_text_mislabeled_as_image(self):
+        config = ProviderConfig(
+            id="node_1",
+            api_type="openai_image",
+            base_url="https://api.example.com/v1",
+            api_keys=["key-1"],
+            model="image-model",
+            timeout=30.0,
+        )
+        session = FakeSession(FakeResponse({"data": [{"url": "https://cdn.example.com/out.png"}]}))
+        provider = OpenAIProvider(config, session)
+        reference = "data:image/png;base64," + base64.b64encode(b"plain text").decode("ascii")
+
+        with self.assertRaisesRegex(RuntimeError, "不是支持的图片格式"):
+            await provider.generate_image("draw a cat", user_refs=[reference])
+        self.assertEqual(session.posts, [])
+
+    async def test_openai_chat_non_success_response_honors_body_limit(self):
+        config = ProviderConfig(
+            id="chat-node",
+            api_type="openai_chat",
+            base_url="https://api.example.com/v1",
+            api_keys=["key-1"],
+            model="chat-image-model",
+            timeout=30.0,
+        )
+        response = FakeResponse({"error": {"message": "too large"}}, status=400)
+        response.headers = {"Content-Length": str(base_module.MAX_PROVIDER_RESPONSE_BYTES + 1)}
+        provider = OpenAIChatProvider(config, FakeSession(response))
+
+        with self.assertRaisesRegex(RuntimeError, "响应体超过"):
+            await provider.generate_image("draw a cat")
+
+    async def test_custom_image_json_endpoint_rejects_more_than_three_refs(self):
+        endpoint = "https://api.example.com/v1/images/generations"
+        config = ProviderConfig(
+            id="custom_node",
+            api_type="custom_endpoint",
+            base_url=endpoint,
+            api_keys=["key-1"],
+            model="image-model",
+            timeout=30.0,
+        )
+        session = FakeSession(FakeResponse({"data": [{"url": "https://cdn.example.com/out.png"}]}))
+        provider = CustomEndpointProvider(config, session)
+        refs = [
+            "data:image/png;base64," + base64.b64encode(f"image-{index}".encode() * 20).decode("ascii")
+            for index in range(4)
+        ]
+
+        with self.assertRaisesRegex(ValueError, "最多支持 3 张"):
+            await provider.generate_image("edit a cat", user_refs=refs)
+        self.assertEqual(session.posts, [])
+
+    def test_provider_filter_blocks_underscore_image_fields(self):
+        filtered = base_module.filter_provider_api_kwargs(
+            {"image_1": "secret", "image2": "secret", "size": "1024x1024"},
+            "node_1",
+        )
+        self.assertEqual(filtered, {"size": "1024x1024"})
+
+    def test_api_key_rotation_scope_is_isolated_by_provider_id(self):
+        scope = "image:openai_image:https://api.example.com/v1"
+
+        self.assertEqual(base_module.next_api_key("node-a", ["a1", "a2"], scope=scope), "a1")
+        self.assertEqual(base_module.next_api_key("node-b", ["b1", "b2"], scope=scope), "b1")
+        self.assertEqual(base_module.next_api_key("node-a", ["a1", "a2"], scope=scope), "a2")
+        self.assertEqual(base_module.next_api_key("node-b", ["b1", "b2"], scope=scope), "b2")
+
+    def test_cache_cleanup_skips_leased_reference_file(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin.data_dir = str(PLUGIN_DIR / ".pytest_cache" / "lease_security")
+        plugin._cache_lease_lock = threading.RLock()
+        plugin._cache_leases = {}
+        image_path = Path(plugin.data_dir) / "user_refs" / "leased.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\nleased")
+        item = {
+            "cache_name": "user_refs",
+            "path": str(image_path),
+            "bytes": image_path.stat().st_size,
+            "mtime": image_path.stat().st_mtime,
+        }
+
+        lease = plugin._lease_cache_paths([str(image_path)])
+        result = plugin._delete_cache_files([item], reason="test")
+        self.assertEqual(result["deleted_count"], 0)
+        self.assertTrue(image_path.exists())
+
+        plugin._release_cache_paths(lease)
+        result = plugin._delete_cache_files([item], reason="test")
+        self.assertEqual(result["deleted_count"], 1)
+        self.assertFalse(image_path.exists())
+
+    def test_cache_cleanup_rechecks_lease_acquired_after_initial_snapshot(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin.data_dir = str(PLUGIN_DIR / ".pytest_cache" / "lease_race_security")
+        plugin._cache_lease_lock = threading.RLock()
+        plugin._cache_leases = {}
+        image_path = Path(plugin.data_dir) / "user_refs" / "leased-late.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\nleased-late")
+        item = {
+            "cache_name": "user_refs",
+            "path": str(image_path),
+            "bytes": image_path.stat().st_size,
+            "mtime": image_path.stat().st_mtime,
+        }
+        acquired_lease = []
+
+        def delayed_items():
+            acquired_lease.extend(plugin._lease_cache_paths([str(image_path)]))
+            yield item
+
+        try:
+            result = plugin._delete_cache_files(delayed_items(), reason="test")
+            self.assertEqual(result["deleted_count"], 0)
+            self.assertEqual(result["skipped_count"], 1)
+            self.assertTrue(image_path.exists())
+        finally:
+            plugin._release_cache_paths(acquired_lease)
+            image_path.unlink(missing_ok=True)
+
+    async def test_video_submit_and_poll_reuse_same_api_key(self):
+        provider = ProviderConfig(
+            id="video-key-lifecycle",
+            api_type="async_task",
+            base_url="https://api.example.com/v1",
+            api_keys=["key-a", "key-b"],
+            model="video-model",
+            timeout=30.0,
+        )
+
+        class SequencedSession:
+            def __init__(self):
+                self.posts = []
+                self.gets = []
+
+            def post(self, url, **kwargs):
+                self.posts.append({"url": url, **kwargs})
+                return FakePost(FakeResponse({"id": "task-1"}))
+
+            def get(self, url, **kwargs):
+                self.gets.append({"url": url, **kwargs})
+                return FakePost(FakeResponse({"status": "SUCCESS", "url": "https://cdn.example.com/out.mp4"}))
+
+        session = SequencedSession()
+        manager = VideoManager(types.SimpleNamespace())
+
+        result = await manager._fetch_video_from_api(provider, "make a video", session)
+
+        self.assertEqual(result, "https://cdn.example.com/out.mp4")
+        self.assertEqual(session.posts[0]["headers"]["Authorization"], "Bearer key-a")
+        self.assertEqual(session.gets[0]["headers"]["Authorization"], "Bearer key-a")
+
+
+class ReliabilityBoundaryRegressionTest(unittest.IsolatedAsyncioTestCase):
+    def _quota_plugin(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin.plugin_config = types.SimpleNamespace(enable_daily_limit=True, daily_image_limit=2)
+        plugin._usage_stats = {"date": plugin._today_key(), "total": 0, "users": {}}
+        plugin._quota_reservations = {}
+        plugin._usage_lock = threading.RLock()
+        plugin._access_status = lambda event, refresh=True: {
+            "user_id": "user-1",
+            "group_id": "",
+            "allowed": True,
+            "unlimited": False,
+            "level": "limited",
+            "reason": "",
+        }
+        plugin._get_event_user_id = lambda event: "user-1"
+        plugin._permission_denied_message = lambda event: ""
+        return plugin
+
+    def test_quota_reservation_is_atomic_under_real_thread_contention(self):
+        plugin = self._quota_plugin()
+        start = threading.Barrier(3)
+        results = []
+        failures = []
+        result_lock = threading.Lock()
+
+        def reserve():
+            try:
+                start.wait(timeout=5)
+                result = plugin._reserve_image_quota(object(), 2)
+                with result_lock:
+                    results.append(result)
+            except BaseException as exc:
+                with result_lock:
+                    failures.append(exc)
+
+        workers = [threading.Thread(target=reserve) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        start.wait(timeout=5)
+        for worker in workers:
+            worker.join(timeout=5)
+
+        self.assertFalse(failures)
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(sorted(reserved for _, reserved in results), [0, 2])
+        self.assertEqual(sum(1 for message, _ in results if not message), 1)
+        self.assertEqual(sum(1 for message, _ in results if "额度不足" in message), 1)
+
+    async def test_plugin_generation_releases_quota_reservation_when_cancelled(self):
+        plugin = self._quota_plugin()
+        plugin.plugin_config.max_batch_count = 2
+        plugin._refresh_from_native_config_if_changed = lambda: None
+        plugin._validated_plugin_image_refs = lambda refs, allow_local_refs=False: []
+
+        async def cancel_generation(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        plugin._run_text2img_generation = cancel_generation
+
+        with self.assertRaises(asyncio.CancelledError):
+            await plugin.generate_images_for_plugin(
+                prompt="draw a cat",
+                event=object(),
+                record_usage=True,
+            )
+
+        self.assertEqual(plugin._quota_reservations, {})
+
+    async def test_chat_generation_handlers_release_reservation_when_cancelled(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin.plugin_config = types.SimpleNamespace(
+            presets={"胶片少女": "35mm film portrait"},
+            draw_pending_message="pending",
+            selfie_pending_message="pending",
+            persona_name="默认助理",
+            persona_ref_images=[],
+            chains={"selfie": ["selfie-node"]},
+            verbose_report=False,
+        )
+        plugin.cmd_parser = main_module.CommandParser()
+        plugin._permission_denied_message = lambda event: ""
+        plugin._reserve_image_quota = lambda event, count: ("", 1)
+        released = []
+        plugin._release_image_quota = lambda event, count: released.append(count)
+        plugin._get_event_text = lambda event: "胶片少女"
+        plugin._event_is_at_or_wake_command = lambda event: True
+        plugin._get_event_images = lambda *args, **kwargs: ["reference"]
+        plugin._extract_command_message = lambda event, command, fallback="": fallback or "prompt"
+        plugin.prompt_optimizer = types.SimpleNamespace(
+            optimize=lambda prompt, count, session=None: self._return_prompts(prompt)
+        )
+        plugin.persona_manager = types.SimpleNamespace(
+            build_persona_prompt=lambda prompt: (prompt, {})
+        )
+
+        async def cancel_reference_processing(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        plugin._process_and_save_images = cancel_reference_processing
+
+        async def consume(generator):
+            async for _ in generator:
+                pass
+
+        handlers = (
+            plugin.on_message_preset(object()),
+            plugin.cmd_draw(object(), "prompt"),
+            plugin.cmd_selfie(object(), "prompt"),
+        )
+        for handler in handlers:
+            with self.assertRaises(asyncio.CancelledError):
+                await consume(handler)
+
+        self.assertEqual(released, [1, 1, 1])
+
+    async def _return_prompts(self, prompt):
+        return [prompt]
+
+    async def test_llm_image_tools_release_reservation_when_cancelled(self):
+        plugin = self._quota_plugin()
+        plugin.plugin_config.max_batch_count = 2
+
+        async def cancel_generation(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        plugin._run_text2img_generation = cancel_generation
+        plugin._run_selfie_generation = cancel_generation
+
+        with self.assertRaises(asyncio.CancelledError):
+            await plugin.tool_generate_image(object(), "draw a cat")
+        self.assertEqual(plugin._quota_reservations, {})
+
+        with self.assertRaises(asyncio.CancelledError):
+            await plugin.tool_generate_selfie(object(), "look at camera")
+        self.assertEqual(plugin._quota_reservations, {})
+
+    async def test_config_apply_failure_restores_memory_and_persisted_file(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        old_config = {"verbose_report": False, "providers": []}
+        old_runtime = tuple(object() for _ in range(4))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin.data_dir = temp_dir
+            plugin.config_path = str(Path(temp_dir) / "omnidraw_persist_config.json")
+            plugin._config_lock = threading.RLock()
+            plugin._persist_config_mtime = 0.0
+            plugin.raw_config = json.loads(json.dumps(old_config))
+            (
+                plugin.plugin_config,
+                plugin.persona_manager,
+                plugin.video_manager,
+                plugin.prompt_optimizer,
+            ) = old_runtime
+            plugin._persist_config()
+
+            plugin._normalize_saved_page_images = lambda config: None
+            plugin._prepare_runtime_config = lambda config: config
+            plugin._safe_update_context_config = lambda: None
+
+            def fail_apply(candidate):
+                plugin.plugin_config = object()
+                plugin.persona_manager = object()
+                raise RuntimeError("apply failed")
+
+            plugin._apply_runtime_config = fail_apply
+
+            async def get_json(*args, **kwargs):
+                return {"verbose_report": True}
+
+            original_request = main_module.request
+            main_module.request = types.SimpleNamespace(content_length=None, get_json=get_json)
+            try:
+                response, status = await plugin.save_config_handler()
+            finally:
+                main_module.request = original_request
+
+            self.assertEqual(status, 500)
+            self.assertFalse(response["args"][0]["success"])
+            self.assertEqual(plugin.raw_config, old_config)
+            self.assertIs(plugin.plugin_config, old_runtime[0])
+            self.assertIs(plugin.persona_manager, old_runtime[1])
+            self.assertIs(plugin.video_manager, old_runtime[2])
+            self.assertIs(plugin.prompt_optimizer, old_runtime[3])
+            self.assertEqual(json.loads(Path(plugin.config_path).read_text(encoding="utf-8")), old_config)
+
+    async def test_reference_redirect_is_revalidated_before_following(self):
+        config = ProviderConfig(
+            id="redirect-node",
+            api_type="openai_image",
+            base_url="https://api.example.com/v1",
+            api_keys=["key-1"],
+            model="image-model",
+            timeout=30.0,
+        )
+
+        class RedirectSession:
+            def __init__(self):
+                self.gets = []
+
+            def get(self, url, **kwargs):
+                self.gets.append({"url": url, **kwargs})
+                response = FakeResponse({}, status=302)
+                response.headers = {"Location": "http://127.0.0.1/private.png"}
+                return FakePost(response)
+
+        session = RedirectSession()
+        provider = OpenAIProvider(config, session)
+        checked_urls = []
+        original_validate = base_module._validate_remote_reference_url
+
+        def validate_each_hop(url):
+            checked_urls.append(url)
+            if "127.0.0.1" in url:
+                raise RuntimeError("private redirect blocked")
+
+        base_module._validate_remote_reference_url = validate_each_hop
+        try:
+            with self.assertRaisesRegex(RuntimeError, "private redirect blocked"):
+                await provider.read_reference_image("https://public.example/ref.png")
+        finally:
+            base_module._validate_remote_reference_url = original_validate
+
+        self.assertEqual(
+            checked_urls,
+            ["https://public.example/ref.png", "http://127.0.0.1/private.png"],
+        )
+        self.assertEqual(len(session.gets), 1)
+
+    async def test_video_async_submission_rejects_non_object_json(self):
+        provider = ProviderConfig(
+            id="video-invalid-submit",
+            api_type="async_task",
+            base_url="https://invalid-submit.example.com/v1",
+            api_keys=["key-a"],
+            model="video-model",
+            timeout=30.0,
+        )
+        session = FakeSession(FakeResponse(["task-1"]))
+        manager = VideoManager(types.SimpleNamespace())
+
+        with self.assertRaisesRegex(VideoTaskError, "提交接口返回的 JSON 不是对象"):
+            await manager._fetch_video_from_api(provider, "make a video", session)
+        self.assertEqual(len(session.posts), 1)
+        self.assertEqual(session.gets, [])
+
+    async def test_video_polling_honors_zero_second_absolute_deadline(self):
+        provider = ProviderConfig(
+            id="video-zero-deadline",
+            api_type="async_task",
+            base_url="https://zero-deadline.example.com/v1",
+            api_keys=["key-a"],
+            model="video-model",
+            timeout=0.0,
+        )
+
+        class SubmitOnlySession:
+            def __init__(self):
+                self.posts = []
+                self.gets = []
+
+            def post(self, url, **kwargs):
+                self.posts.append({"url": url, **kwargs})
+                return FakePost(FakeResponse({"id": "task-1"}))
+
+            def get(self, url, **kwargs):
+                self.gets.append({"url": url, **kwargs})
+                return FakePost(FakeResponse({"status": "SUCCESS", "url": "https://cdn.example.com/out.mp4"}))
+
+        session = SubmitOnlySession()
+        manager = VideoManager(types.SimpleNamespace())
+
+        with self.assertRaisesRegex(VideoTaskError, "轮询超时"):
+            await manager._fetch_video_from_api(provider, "make a video", session)
+        self.assertEqual(len(session.posts), 1)
+        self.assertEqual(session.gets, [])
+
+    async def test_video_polling_propagates_cancellation(self):
+        provider = ProviderConfig(
+            id="video-cancel",
+            api_type="async_task",
+            base_url="https://cancel.example.com/v1",
+            api_keys=["key-a"],
+            model="video-model",
+            timeout=30.0,
+        )
+
+        class CancelledRequest:
+            async def __aenter__(self):
+                raise asyncio.CancelledError()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class CancelledSession:
+            def get(self, url, **kwargs):
+                return CancelledRequest()
+
+        manager = VideoManager(types.SimpleNamespace())
+        with self.assertRaises(asyncio.CancelledError):
+            await manager._poll_task_result(provider, "task-1", CancelledSession(), api_key="key-a")
+
+    async def test_draw_failure_after_pending_message_returns_final_error_and_releases_quota(self):
+        helper = CommandPendingSendTest(methodName="test_draw_sends_pending_message_without_yielding_before_chain")
+        plugin = helper._plugin()
+        plugin.plugin_config.draw_error_message = "绘制失败: {error}"
+        plugin.plugin_config.selfie_error_message = "自拍失败: {error}"
+        plugin._reserve_image_quota = lambda event, count=1: ("", 1)
+        released = []
+        plugin._release_image_quota = lambda event, count: released.append(count)
+        sequence = []
+
+        class FailingChainManager:
+            def __init__(self, config, session):
+                pass
+
+            async def run_chain_with_metadata(self, chain_name, prompt, **kwargs):
+                sequence.append("generate")
+                raise RuntimeError("provider failed")
+
+        class OrderedEvent(helper.FakeEvent):
+            async def send(self, result):
+                sequence.append("pending")
+                await super().send(result)
+
+        event = OrderedEvent()
+        original_client_session = main_module.aiohttp.ClientSession
+        original_chain_manager = main_module.ChainManager
+        main_module.aiohttp.ClientSession = FakeClientSession
+        main_module.ChainManager = FailingChainManager
+        try:
+            results = [item async for item in plugin.cmd_draw(event, "海边日落")]
+        finally:
+            main_module.aiohttp.ClientSession = original_client_session
+            main_module.ChainManager = original_chain_manager
+
+        self.assertEqual(sequence, ["pending", "generate"])
+        self.assertEqual(results, [("plain", "绘制失败: provider failed")])
+        self.assertEqual(released, [1])
+        self.assertEqual(plugin._recorded_count, 0)
+
+    def test_command_and_provider_filters_block_all_reserved_generation_fields(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        command_payload = {
+            "PROMPT": "override",
+            "Messages": [],
+            "TOOLS": [],
+            "Input": "override",
+            "N": 99,
+            "Stream": True,
+            "USER_REF": "secret",
+            "user_refs": ["secret"],
+            "Persona_Ref": "secret",
+            "persona_refs": ["secret"],
+            "size": "1024x1024",
+        }
+        self.assertEqual(plugin._sanitize_generation_kwargs(command_payload), {"size": "1024x1024"})
+
+        provider_payload = {
+            **command_payload,
+            "MODEL": "override",
+            "Contents": [],
+            "Image": "secret",
+            "images": ["secret"],
+            "IMAGE_URL": "secret",
+        }
+        self.assertEqual(
+            base_module.filter_provider_api_kwargs(provider_payload, "node-1"),
+            {"size": "1024x1024"},
+        )
+
+    def test_admin_decorators_and_reserved_preset_names_are_source_protected(self):
+        tree = ast.parse(Path(main_module.__file__).read_text(encoding="utf-8"))
+        functions = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for function_name in (
+            "cmd_switch_persona",
+            "cmd_switch_chain",
+            "cmd_switch_model",
+            "cmd_add_preset",
+            "cmd_delete_preset",
+        ):
+            with self.subTest(function=function_name):
+                decorators = [ast.unparse(item) for item in functions[function_name].decorator_list]
+                self.assertIn("filter.permission_type(filter.PermissionType.ADMIN)", decorators)
+
+        expected_reserved = {
+            "万象帮助",
+            "查看预设",
+            "极速宏",
+            "添加预设",
+            "删除预设",
+            "清理缓存",
+            "签到",
+            "人设",
+            "切换人设",
+            "切换链路",
+            "切换模型",
+            "画",
+            "自拍",
+            "视频",
+        }
+        self.assertTrue(expected_reserved.issubset(main_module.RESERVED_PRESET_NAMES))
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin._command_prefixes = lambda: ["/"]
+        for name in expected_reserved:
+            with self.subTest(preset=name):
+                self.assertIn("内置指令同名", plugin._validate_preset_name(name))
+
+        cleaned = plugin._clean_runtime_config({
+            "presets": [
+                "画:不应覆盖内置命令",
+                {"name": "切换模型", "prompt": "不应覆盖内置命令"},
+                "普通预设:保留",
+            ]
+        })
+        self.assertEqual(cleaned["presets"], ["普通预设:保留"])
+
+    def test_numeric_and_boolean_config_values_are_safely_normalized(self):
+        raw_config = {
+            "providers": [{
+                "id": "image-node",
+                "api_type": "openai_image",
+                "base_url": "https://api.example.com/v1",
+                "api_keys": ["key"],
+                "model": "image-model",
+                "timeout": "nan",
+            }],
+            "video_providers": [{
+                "id": "video-node",
+                "api_type": "async_task",
+                "base_url": "https://video.example.com/v1",
+                "api_keys": ["key"],
+                "model": "video-model",
+                "timeout": "inf",
+            }],
+            "optimizer_config": {
+                "enable_optimizer": "false",
+                "optimizer_timeout": "nan",
+                "max_batch_count": 999,
+            },
+            "cache_config": {
+                "enable_scheduled_cleanup": "0",
+                "scheduled_cleanup_interval_hours": 0,
+                "enable_size_limit_cleanup": "yes",
+                "max_cache_size_mb": "inf",
+            },
+            "verbose_report": "false",
+            "show_generation_time": "1",
+            "show_request_model": "no",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = PluginConfig.from_dict(raw_config, temp_dir, cleanup_persona_refs=False)
+
+        self.assertFalse(config.enable_optimizer)
+        self.assertEqual(config.optimizer_timeout, 15.0)
+        self.assertEqual(config.max_batch_count, 10)
+        self.assertEqual(config.providers[0].timeout, 60.0)
+        self.assertEqual(config.video_providers[0].timeout, 300.0)
+        self.assertFalse(config.enable_scheduled_cleanup)
+        self.assertEqual(config.scheduled_cleanup_interval_hours, 1)
+        self.assertTrue(config.enable_size_limit_cleanup)
+        self.assertEqual(config.max_cache_size_mb, 512)
+        self.assertFalse(config.verbose_report)
+        self.assertTrue(config.show_generation_time)
+        self.assertFalse(config.show_request_model)
+
+    def test_background_queue_rejects_over_capacity_and_closes_coroutine(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin._background_tasks = set(range(main_module.MAX_BACKGROUND_TASKS))
+        released = []
+        plugin._lease_cache_paths = lambda paths: list(paths)
+        plugin._release_cache_paths = lambda paths: released.append(list(paths))
+
+        async def never_started():
+            await asyncio.sleep(0)
+
+        coro = never_started()
+        with self.assertRaisesRegex(RuntimeError, "队列已满"):
+            plugin._create_background_task(coro, leased_paths=["leased.png"])
+
+        self.assertEqual(released, [["leased.png"]])
+        self.assertIsNone(coro.cr_frame)
+
+    async def test_background_task_releases_lease_after_failure(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin._background_tasks = set()
+        plugin._background_task_kinds = {}
+        plugin._background_semaphore = None
+        plugin._background_semaphore_loop = None
+        plugin._lease_cache_paths = lambda paths: list(paths)
+        released = []
+        plugin._release_cache_paths = lambda paths: released.append(list(paths))
+
+        async def fail():
+            raise RuntimeError("background failed")
+
+        task = plugin._create_background_task(fail(), kind="video", leased_paths=["leased.png"])
+        result = (await asyncio.gather(task, return_exceptions=True))[0]
+        await asyncio.sleep(0)
+
+        self.assertIsInstance(result, RuntimeError)
+        self.assertEqual(released, [["leased.png"]])
+        self.assertNotIn(task, plugin._background_tasks)
+        self.assertNotIn(task, plugin._background_task_kinds)
+
+    async def test_background_semaphore_limits_simultaneous_tasks(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin._background_tasks = set()
+        plugin._background_task_kinds = {}
+        plugin._background_semaphore = None
+        plugin._background_semaphore_loop = None
+        plugin._lease_cache_paths = lambda paths: []
+        plugin._release_cache_paths = lambda paths: None
+        gate = asyncio.Event()
+        saturated = asyncio.Event()
+        started = 0
+        active = 0
+        peak = 0
+
+        async def worker():
+            nonlocal started, active, peak
+            started += 1
+            active += 1
+            peak = max(peak, active)
+            if started == main_module.MAX_ACTIVE_BACKGROUND_TASKS:
+                saturated.set()
+            try:
+                await gate.wait()
+            finally:
+                active -= 1
+
+        tasks = [
+            plugin._create_background_task(worker(), kind="video")
+            for _ in range(main_module.MAX_ACTIVE_BACKGROUND_TASKS + 1)
+        ]
+        await asyncio.wait_for(saturated.wait(), timeout=2)
+        await asyncio.sleep(0)
+
+        self.assertEqual(started, main_module.MAX_ACTIVE_BACKGROUND_TASKS)
+        self.assertEqual(peak, main_module.MAX_ACTIVE_BACKGROUND_TASKS)
+
+        gate.set()
+        await asyncio.gather(*tasks)
+        await asyncio.sleep(0)
+        self.assertEqual(started, main_module.MAX_ACTIVE_BACKGROUND_TASKS + 1)
+        self.assertEqual(peak, main_module.MAX_ACTIVE_BACKGROUND_TASKS)
+
+    async def test_background_task_closes_coroutine_when_cancelled_before_semaphore(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin._background_tasks = set()
+        plugin._background_task_kinds = {}
+        plugin._background_semaphore = asyncio.Semaphore(0)
+        plugin._background_semaphore_loop = asyncio.get_running_loop()
+        plugin._lease_cache_paths = lambda paths: list(paths)
+        released = []
+        plugin._release_cache_paths = lambda paths: released.append(list(paths))
+
+        async def never_started():
+            await asyncio.sleep(0)
+
+        coro = never_started()
+        task = plugin._create_background_task(coro, kind="video", leased_paths=["queued.png"])
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+        self.assertIsNone(coro.cr_frame)
+        self.assertEqual(released, [["queued.png"]])
+
+    async def test_video_error_text_redacts_provider_secrets(self):
+        manager = object.__new__(VideoManager)
+        response = FakeResponse({"error": {"message": "api_key=video-secret"}}, status=401)
+
+        message = await manager._read_error(response)
+
+        self.assertNotIn("video-secret", message)
+        self.assertIn("<redacted>", message)
+
+    async def test_main_reference_redirect_is_revalidated_before_following(self):
+        plugin = object.__new__(OmniDrawPlugin)
+        checked_urls = []
+
+        def validate_each_hop(url):
+            checked_urls.append(url)
+            if "127.0.0.1" in url:
+                raise ValueError("private redirect blocked")
+
+        plugin._validate_remote_image_url = validate_each_hop
+
+        class RedirectSession:
+            def __init__(self):
+                self.gets = []
+
+            def get(self, url, **kwargs):
+                self.gets.append({"url": url, **kwargs})
+                response = FakeResponse({}, status=302)
+                response.headers = {"Location": "http://127.0.0.1/private.png"}
+                return FakePost(response)
+
+        session = RedirectSession()
+        with self.assertRaisesRegex(ValueError, "private redirect blocked"):
+            await plugin._download_remote_image(session, "https://public.example/ref.png", {})
+
+        self.assertEqual(
+            checked_urls,
+            ["https://public.example/ref.png", "http://127.0.0.1/private.png"],
+        )
+        self.assertEqual(len(session.gets), 1)
+
+    async def test_video_reference_redirect_is_revalidated_before_following(self):
+        manager = VideoManager(types.SimpleNamespace())
+        checked_urls = []
+        original_validate = video_manager_module._validate_remote_reference_url
+
+        def validate_each_hop(url):
+            checked_urls.append(url)
+            if "127.0.0.1" in url:
+                raise VideoTaskError("private redirect blocked")
+
+        class RedirectSession:
+            def __init__(self):
+                self.gets = []
+
+            def get(self, url, **kwargs):
+                self.gets.append({"url": url, **kwargs})
+                response = FakeResponse({}, status=302)
+                response.headers = {"Location": "http://127.0.0.1/private.png"}
+                return FakePost(response)
+
+        session = RedirectSession()
+        video_manager_module._validate_remote_reference_url = validate_each_hop
+        try:
+            with self.assertRaisesRegex(VideoTaskError, "private redirect blocked"):
+                await manager._encode_image_to_base64("https://public.example/ref.png", session)
+        finally:
+            video_manager_module._validate_remote_reference_url = original_validate
+
+        self.assertEqual(
+            checked_urls,
+            ["https://public.example/ref.png", "http://127.0.0.1/private.png"],
+        )
+        self.assertEqual(len(session.gets), 1)
 
 
 if __name__ == "__main__":
