@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#C1E6FF" />
     <title>OmniDraw Station</title>
     <link rel="icon" href="./logo.png" />
-    <link rel="stylesheet" href="./style.css?v=3.3.12" />
+    <link rel="stylesheet" href="./style.css?v=3.4.0" />
 </head>
 <body>
     <div class="app-shell">
@@ -63,13 +63,14 @@
             </div>
         </aside>
 
-        <main class="content">
+        <main class="content" aria-busy="true">
             <header class="topbar">
                 <div>
                     <span class="eyebrow">PLUGIN SETTINGS</span>
                     <h2 id="active-title">全局配置</h2>
+                    <p class="topbar-caption">统一管理绘图、自拍、视频与副脑调度</p>
                 </div>
-                <div class="status-pill"><span></span>READY</div>
+                <div class="status-pill" id="page-status" aria-live="polite"><span></span><strong>LOADING</strong></div>
             </header>
 
             <section id="tab-basic" class="tab-pane active" data-title="全局配置">
@@ -323,7 +324,7 @@
                                 <span class="upload-text">添加图片</span>
                             </button>
                         </div>
-                        <input type="file" id="hidden-file-input" accept="image/png, image/jpeg, image/webp" multiple hidden />
+                        <input type="file" id="hidden-file-input" accept="image/png, image/jpeg, image/webp, image/gif" multiple hidden />
                     </article>
                 </div>
             </section>
@@ -417,11 +418,11 @@
                         </div>
                         <div class="form-group">
                             <label for="opt_timeout">超时限制 (秒)</label>
-                            <input type="number" id="opt_timeout" class="input-modern" min="1" />
+                            <input type="number" id="opt_timeout" class="input-modern" min="1" max="3600" />
                         </div>
                         <div class="form-group">
                             <label for="opt_batch">批量上限</label>
-                            <input type="number" id="opt_batch" class="input-modern" min="0" />
+                            <input type="number" id="opt_batch" class="input-modern" min="0" max="10" />
                         </div>
                         <div class="form-group full-width">
                             <label for="opt_custom">自定义注入要求</label>
@@ -471,6 +472,7 @@
     </div>
 
     <div id="toast-container" aria-live="polite"></div>
-    <script type="module" src="./app.js?v=3.3.11"></script>
+    <noscript><div class="noscript-banner">配置页需要启用 JavaScript 才能运行。</div></noscript>
+    <script type="module" src="./app.js?v=3.4.0"></script>
 </body>
 </html>

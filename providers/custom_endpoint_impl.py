@@ -2,7 +2,6 @@
 
 import base64
 import json
-import os
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
@@ -13,8 +12,8 @@ from .base import (
     BaseProvider,
     extract_error_message,
     extract_image_url_from_response,
-    guess_image_content_type,
     is_complete_endpoint_url,
+    read_response_text_limited,
     summarize_payload_json_for_log,
     summarize_response_text_for_log,
     summarize_text_for_log,
@@ -26,36 +25,19 @@ class CustomEndpointProvider(BaseProvider):
     """Request exactly the configured URL while adapting payloads by endpoint shape."""
 
     async def _get_image_bytes(self, image_path_or_url: str) -> bytes:
-        if image_path_or_url.startswith("data:image"):
-            try:
-                return base64.b64decode(image_path_or_url.split(",", 1)[1], validate=False)
-            except Exception as exc:
-                raise RuntimeError(f"Base64 参考图解析失败: {exc}")
-        if image_path_or_url.startswith("http"):
-            logger.info("📥 [自定义通道] 正在下载网络参考图并转码...")
-            headers = {"User-Agent": "Mozilla/5.0"}
-            async with self.session.get(image_path_or_url, headers=headers) as response:
-                if response.status != 200:
-                    raise RuntimeError(f"参考图下载失败，服务器返回状态码: {response.status}")
-                return await response.read()
-        if not os.path.exists(image_path_or_url):
-            raise RuntimeError(f"本地参考图不存在: {image_path_or_url}")
-        with open(image_path_or_url, "rb") as file:
-            return file.read()
+        image_bytes, _ = await self.read_reference_image(image_path_or_url)
+        return image_bytes
 
     async def _encode_image_to_data_url(self, image_path_or_url: str) -> str:
-        image_bytes = await self._get_image_bytes(image_path_or_url)
-        mime_type = guess_image_content_type(image_path_or_url)
+        image_bytes, mime_type = await self.read_reference_image(image_path_or_url)
         return f"data:{mime_type};base64," + base64.b64encode(image_bytes).decode("utf-8")
 
     async def _encode_reference_images(self, ref_images: List[str]) -> List[str]:
-        encoded_images = []
-        for index, ref_image in enumerate(ref_images, start=1):
-            try:
-                encoded_images.append(await self._encode_image_to_data_url(ref_image))
-            except Exception as exc:
-                raise RuntimeError(f"读取第 {index} 张参考图数据失败: {exc}")
-        return encoded_images
+        loaded_refs = await self.load_reference_images(ref_images)
+        return [
+            f"data:{mime_type};base64," + base64.b64encode(image_bytes).decode("utf-8")
+            for image_bytes, mime_type in loaded_refs
+        ]
 
     def _endpoint(self) -> str:
         endpoint = str(self.config.base_url or "").strip()
@@ -127,17 +109,14 @@ class CustomEndpointProvider(BaseProvider):
         ref_images: List[str],
         api_kwargs: Dict[str, Any],
     ) -> str:
+        loaded_refs = await self.load_reference_images(ref_images)
         data = aiohttp.FormData()
-        for index, ref_image in enumerate(ref_images, start=1):
-            try:
-                image_bytes = await self._get_image_bytes(ref_image)
-            except Exception as exc:
-                raise RuntimeError(f"读取第 {index} 张参考图数据失败: {exc}")
+        for index, (image_bytes, mime_type) in enumerate(loaded_refs, start=1):
             data.add_field(
                 "image" if len(ref_images) == 1 else "image[]",
                 image_bytes,
                 filename=f"reference_{index}.png",
-                content_type=guess_image_content_type(ref_image),
+                content_type=mime_type,
             )
         data.add_field("prompt", prompt)
         data.add_field("model", self.config.model)
@@ -151,7 +130,7 @@ class CustomEndpointProvider(BaseProvider):
             return await self._parse_response(response, endpoint)
 
     async def _parse_response(self, response: aiohttp.ClientResponse, endpoint: str) -> str:
-        text = await response.text()
+        text = await read_response_text_limited(response)
         if response.status >= 400:
             logger.error("💥 自定义通道 API 返回错误摘要: " + summarize_response_text_for_log(text, max_string_length=500))
             raise RuntimeError(f"HTTP {response.status}: {extract_error_message(text)}")
@@ -180,8 +159,7 @@ class CustomEndpointProvider(BaseProvider):
         endpoint = self._endpoint()
         endpoint_path = self._endpoint_path(endpoint)
         ref_images = self.get_reference_images(**kwargs)
-        internal_keys = {"user_refs", "user_ref", "persona_refs", "persona_ref"}
-        api_kwargs = {key: value for key, value in kwargs.items() if key not in internal_keys}
+        api_kwargs = self.filter_api_kwargs(kwargs)
         headers = {"Authorization": "Bearer " + current_key}
 
         logger.info(f"📝 [自定义通道] 最终发送给 API 的核心提示词:\n{prompt}")
@@ -191,6 +169,8 @@ class CustomEndpointProvider(BaseProvider):
         if endpoint_path.endswith("/images/edits"):
             return await self._post_edits_form(endpoint, headers, prompt, ref_images, api_kwargs)
 
+        if ref_images and len(ref_images) > 3 and not endpoint_path.endswith(("/chat/completions", "/responses")):
+            raise ValueError("自定义图片 JSON 接口最多支持 3 张参考图。")
         encoded_images = await self._encode_reference_images(ref_images)
         headers["Content-Type"] = "application/json"
 

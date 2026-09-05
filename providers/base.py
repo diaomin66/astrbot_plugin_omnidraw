@@ -1,13 +1,16 @@
 """图片 Provider 基类。"""
+import asyncio
 import aiohttp
 import base64
 import json
+import ipaddress
 import mimetypes
 import os
 import re
+import socket
 import threading
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Iterable, Optional, List
+from typing import Any, Dict, Iterable, Optional, List, Tuple
 from urllib.parse import parse_qsl, urljoin, urlparse, urlunparse
 from astrbot.api import logger
 from ..models import ProviderConfig
@@ -15,9 +18,49 @@ from ..models import ProviderConfig
 _KEY_ROTATION_LOCK = threading.Lock()
 _KEY_ROTATION_INDEX: Dict[str, int] = {}
 
+MAX_REFERENCE_IMAGES = 14
+MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_REFERENCE_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_PROVIDER_RESPONSE_BYTES = 64 * 1024 * 1024
+
+RESERVED_PROVIDER_PARAMETER_KEYS = frozenset(
+    {
+        "prompt",
+        "model",
+        "n",
+        "stream",
+        "messages",
+        "input",
+        "tools",
+        "contents",
+        "image",
+        "images",
+        "image_url",
+        "user_ref",
+        "user_refs",
+        "persona_ref",
+        "persona_refs",
+    }
+)
+
 
 def normalize_base_url(base_url: str) -> str:
-    return str(base_url or "").rstrip("/")
+    value = str(base_url or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    return urlunparse(parsed._replace(path=parsed.path.rstrip("/")))
+
+
+def _replace_url_path(value: str, path: str) -> str:
+    parsed = urlparse(value)
+    return urlunparse(parsed._replace(path=path))
+
+
+def _append_url_path(value: str, suffix: str) -> str:
+    parsed = urlparse(value)
+    path = parsed.path.rstrip("/") + "/" + suffix.lstrip("/")
+    return urlunparse(parsed._replace(path=path))
 
 
 def is_complete_endpoint_url(base_url: str) -> bool:
@@ -40,18 +83,22 @@ def is_complete_endpoint_url(base_url: str) -> bool:
 
 
 def _has_endpoint_path(base_url: str, endpoint_suffixes: Iterable[str]) -> bool:
-    lowered = base_url.lower()
+    lowered = urlparse(base_url).path.rstrip("/").lower()
     return any(lowered.endswith(suffix) for suffix in endpoint_suffixes)
 
 
 def _replace_endpoint_path(base_url: str, endpoint_suffix: str, replacement_suffix: str) -> str:
-    if base_url.lower().endswith(endpoint_suffix):
-        return base_url[: -len(endpoint_suffix)] + replacement_suffix
+    parsed = urlparse(base_url)
+    path = parsed.path.rstrip("/")
+    if path.lower().endswith(endpoint_suffix):
+        return urlunparse(parsed._replace(path=path[: -len(endpoint_suffix)] + replacement_suffix))
     return base_url
 
 
 def strip_known_endpoint_path(base_url: str) -> str:
     base_url = normalize_base_url(base_url)
+    parsed = urlparse(base_url)
+    path = parsed.path.rstrip("/")
     for suffix in (
         "/chat/completions",
         "/responses",
@@ -59,21 +106,29 @@ def strip_known_endpoint_path(base_url: str) -> str:
         "/images/edits",
         "/videos/generations",
     ):
-        if base_url.lower().endswith(suffix):
-            return base_url[: -len(suffix)]
+        if path.lower().endswith(suffix):
+            return urlunparse(parsed._replace(path=path[: -len(suffix)]))
     return base_url
 
 
 def response_base_url(base_url: str) -> str:
     api_root = strip_known_endpoint_path(base_url)
-    return api_root[:-3] if api_root.endswith("/v1") else api_root
+    parsed = urlparse(api_root)
+    path = parsed.path.rstrip("/")
+    if path.lower().endswith("/v1"):
+        return urlunparse(parsed._replace(path=path[:-3]))
+    return api_root
 
 
 def resolve_response_url(value: str, base_url: str) -> str:
     image_ref = str(value or "").strip()
-    if image_ref.startswith("http") or image_ref.startswith("data:"):
+    parsed_ref = urlparse(image_ref)
+    if parsed_ref.scheme.lower() in {"http", "https"} or image_ref.lower().startswith("data:"):
         return image_ref
-    return urljoin(response_base_url(base_url).rstrip("/") + "/", image_ref.lstrip("/"))
+    response_root = response_base_url(base_url)
+    parsed_root = urlparse(response_root)
+    response_dir = urlunparse(parsed_root._replace(path=parsed_root.path.rstrip("/") + "/"))
+    return urljoin(response_dir, image_ref)
 
 
 def build_chat_completions_endpoint(base_url: str) -> str:
@@ -85,7 +140,9 @@ def build_chat_completions_endpoint(base_url: str) -> str:
     base_url = _replace_endpoint_path(base_url, "/responses", "/chat/completions")
     if _has_endpoint_path(base_url, ["/chat/completions"]):
         return base_url
-    return f"{base_url}/chat/completions" if base_url.endswith("/v1") else f"{base_url}/v1/chat/completions"
+    path = urlparse(base_url).path.rstrip("/").lower()
+    suffix = "chat/completions" if path.endswith("/v1") else "v1/chat/completions"
+    return _append_url_path(base_url, suffix)
 
 
 def build_image_generations_endpoint(base_url: str) -> str:
@@ -97,7 +154,7 @@ def build_image_generations_endpoint(base_url: str) -> str:
     base_url = _replace_endpoint_path(base_url, "/images/edits", "/images/generations")
     if _has_endpoint_path(base_url, ["/images/generations"]):
         return base_url
-    return f"{base_url}/images/generations"
+    return _append_url_path(base_url, "images/generations")
 
 
 def build_image_edits_endpoint(base_url: str) -> str:
@@ -106,7 +163,7 @@ def build_image_edits_endpoint(base_url: str) -> str:
         return ""
     if _has_endpoint_path(base_url, ["/images/generations", "/images/edits"]):
         return base_url
-    return f"{base_url}/images/edits"
+    return _append_url_path(base_url, "images/edits")
 
 
 def build_video_generations_endpoint(base_url: str) -> str:
@@ -115,17 +172,19 @@ def build_video_generations_endpoint(base_url: str) -> str:
         return ""
     if _has_endpoint_path(base_url, ["/videos/generations"]):
         return base_url
-    return f"{base_url}/videos/generations"
+    return _append_url_path(base_url, "videos/generations")
 
 
-def next_api_key(provider_id: str, api_keys: List[str]) -> str:
+def next_api_key(provider_id: str, api_keys: List[str], scope: str = "") -> str:
     keys = [str(key).strip() for key in api_keys if str(key).strip()]
     if not provider_id or not keys:
         return ""
+    scope_text = str(scope or "").strip()
+    rotation_scope = f"{provider_id}:{scope_text}" if scope_text else provider_id
     with _KEY_ROTATION_LOCK:
-        idx = _KEY_ROTATION_INDEX.get(provider_id, 0)
+        idx = _KEY_ROTATION_INDEX.get(rotation_scope, 0)
         key = keys[idx % len(keys)]
-        _KEY_ROTATION_INDEX[provider_id] = (idx + 1) % len(keys)
+        _KEY_ROTATION_INDEX[rotation_scope] = (idx + 1) % len(keys)
         return key
 
 
@@ -154,6 +213,152 @@ def guess_image_content_type(image_path_or_url: str, content_type: str = "", fal
         return "image/tiff"
     guessed = mimetypes.guess_type(source)[0] or ""
     return guessed if guessed.startswith("image/") else fallback
+
+
+def _validated_image_content_type(source: str, advertised_content_type: str = "") -> str:
+    advertised = str(advertised_content_type or "").split(";", 1)[0].strip().lower()
+    if advertised:
+        if not advertised.startswith("image/") or advertised == "image/svg+xml":
+            raise RuntimeError(f"参考图响应类型不是受支持的图片: {advertised}")
+        return advertised
+
+    guessed = guess_image_content_type(source, fallback="").lower()
+    if not guessed or guessed == "image/svg+xml":
+        raise RuntimeError("无法确认参考图为受支持的图片类型")
+    return guessed
+
+
+def _image_kind(payload: bytes) -> str:
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if payload.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if payload.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if len(payload) >= 12 and payload.startswith(b"RIFF") and payload[8:12] == b"WEBP":
+        return "webp"
+    if payload.startswith(b"BM"):
+        return "bmp"
+    if payload.startswith((b"II*\x00", b"MM\x00*")):
+        return "tiff"
+    if len(payload) >= 12 and payload[4:8] == b"ftyp" and payload[8:12] in {b"avif", b"avis"}:
+        return "avif"
+    return ""
+
+
+def _image_kind_matches_mime(kind: str, mime_type: str) -> bool:
+    expected = {
+        "image/png": "png",
+        "image/x-png": "png",
+        "image/jpeg": "jpeg",
+        "image/jpg": "jpeg",
+        "image/pjpeg": "jpeg",
+        "image/gif": "gif",
+        "image/webp": "webp",
+        "image/bmp": "bmp",
+        "image/x-ms-bmp": "bmp",
+        "image/tiff": "tiff",
+        "image/x-tiff": "tiff",
+        "image/avif": "avif",
+    }.get(str(mime_type or "").split(";", 1)[0].strip().lower())
+    return bool(kind and expected and kind == expected)
+
+
+def _validate_image_payload(payload: bytes, mime_type: str, source: str) -> bytes:
+    if not payload:
+        raise RuntimeError("参考图内容为空")
+    kind = _image_kind(payload[:32])
+    if not kind:
+        raise RuntimeError(f"参考图内容不是支持的图片格式: {source}")
+    if not _image_kind_matches_mime(kind, mime_type):
+        raise RuntimeError(f"参考图内容与声明类型不匹配: {source}")
+    return payload
+
+
+def _validate_remote_reference_url(value: str) -> None:
+    parsed = urlparse(str(value or "").strip())
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError("参考图 URL 仅支持 http/https")
+    if parsed.username or parsed.password:
+        raise RuntimeError("参考图 URL 不允许包含用户凭据")
+    try:
+        addresses = socket.getaddrinfo(
+            parsed.hostname,
+            parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"参考图域名解析失败: {exc}") from exc
+    resolved = {item[4][0] for item in addresses if item and item[4]}
+    if not resolved:
+        raise RuntimeError("参考图域名没有可用地址")
+    for address in resolved:
+        try:
+            if not ipaddress.ip_address(address).is_global:
+                raise RuntimeError("参考图 URL 不允许访问本机、私网或链路本地地址")
+        except ValueError as exc:
+            raise RuntimeError("参考图域名解析结果无效") from exc
+
+
+async def read_response_bytes_limited(response: Any, max_bytes: int = MAX_PROVIDER_RESPONSE_BYTES) -> bytes:
+    headers = getattr(response, "headers", None) or {}
+    content_length = headers.get("Content-Length") or headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > max_bytes:
+                raise RuntimeError(f"响应体超过 {max_bytes} 字节上限")
+        except ValueError:
+            pass
+
+    chunks = []
+    total = 0
+    content = getattr(response, "content", None)
+    iter_chunked = getattr(content, "iter_chunked", None)
+    if callable(iter_chunked):
+        async for chunk in iter_chunked(64 * 1024):
+            total += len(chunk)
+            if total > max_bytes:
+                raise RuntimeError(f"响应体超过 {max_bytes} 字节上限")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    read = getattr(response, "read", None)
+    if callable(read):
+        payload = await read()
+        if len(payload) > max_bytes:
+            raise RuntimeError(f"响应体超过 {max_bytes} 字节上限")
+        return payload
+
+    text = await response.text()
+    payload = text.encode("utf-8")
+    if len(payload) > max_bytes:
+        raise RuntimeError(f"响应体超过 {max_bytes} 字节上限")
+    return payload
+
+
+async def read_response_text_limited(response: Any, max_bytes: int = MAX_PROVIDER_RESPONSE_BYTES) -> str:
+    payload = await read_response_bytes_limited(response, max_bytes=max_bytes)
+    encoding = getattr(response, "charset", None) or "utf-8"
+    try:
+        return payload.decode(encoding)
+    except (LookupError, UnicodeDecodeError):
+        return payload.decode("utf-8", errors="replace")
+
+
+def filter_provider_api_kwargs(kwargs: Dict[str, Any], provider_id: str = "") -> Dict[str, Any]:
+    filtered: Dict[str, Any] = {}
+    blocked = []
+    for key, value in kwargs.items():
+        key_text = str(key)
+        lowered = key_text.casefold()
+        if lowered in RESERVED_PROVIDER_PARAMETER_KEYS or re.fullmatch(r"image_?\d+", lowered):
+            blocked.append(key_text)
+            continue
+        filtered[key] = value
+    if blocked:
+        prefix = f"[{provider_id}] " if provider_id else ""
+        logger.warning(prefix + "已忽略禁止透传的 Provider 保留参数: " + ", ".join(sorted(blocked)))
+    return filtered
 
 
 SENSITIVE_LOG_KEY_MARKERS = ("key", "token", "secret", "authorization", "password")
@@ -340,7 +545,16 @@ def extract_image_url_from_response(payload: Any, base_url: str) -> str:
             return resolve_response_url(markdown_match.group(1), base_url)
         url_match = re.search(r"(https?://[^\s\]\)\"']+)", text)
         if url_match:
-            return resolve_response_url(url_match.group(1), base_url)
+            candidate = url_match.group(1).rstrip(".,;:!?，。；：！？>")
+            parsed = urlparse(candidate)
+            path = parsed.path.lower()
+            query = parsed.query.lower()
+            if (
+                text == candidate
+                or re.search(r"\.(?:png|jpe?g|webp|gif|bmp|avif|tiff?)(?:$|/)", path)
+                or "format=image" in query
+            ):
+                return resolve_response_url(candidate, base_url)
         return ""
 
     def coerce_image_value(value: Any, assume_base64: bool = False) -> str:
@@ -490,18 +704,119 @@ class BaseProvider(ABC):
         self._api_keys = [str(key).strip() for key in self.config.api_keys if str(key).strip()]
 
     def get_current_key(self) -> str:
-        return next_api_key(self.config.id, self._api_keys)
+        scope = f"image:{self.config.api_type}:{normalize_base_url(self.config.base_url)}"
+        return next_api_key(self.config.id, self._api_keys, scope=scope)
+
+    def filter_api_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        return filter_provider_api_kwargs(kwargs, self.config.id)
+
+    async def read_reference_image(self, image_path_or_url: str) -> Tuple[bytes, str]:
+        source = str(image_path_or_url or "").strip()
+        if not source:
+            raise RuntimeError("参考图地址为空")
+
+        if source.lower().startswith("data:"):
+            header, separator, encoded = source.partition(",")
+            media_type = header[5:].split(";", 1)[0].strip().lower()
+            if not separator or ";base64" not in header.lower():
+                raise RuntimeError("参考图 Data URL 必须使用 Base64 编码")
+            mime_type = _validated_image_content_type(source, media_type)
+            compact = re.sub(r"\s+", "", encoded)
+            if len(compact) > ((MAX_REFERENCE_IMAGE_BYTES + 2) // 3) * 4 + 4:
+                raise RuntimeError(f"单张参考图超过 {MAX_REFERENCE_IMAGE_BYTES} 字节上限")
+            try:
+                payload = base64.b64decode(compact, validate=True)
+            except Exception as exc:
+                raise RuntimeError(f"Base64 参考图解析失败: {exc}")
+            if len(payload) > MAX_REFERENCE_IMAGE_BYTES:
+                raise RuntimeError(f"单张参考图超过 {MAX_REFERENCE_IMAGE_BYTES} 字节上限")
+            return _validate_image_payload(payload, mime_type, "data URL"), mime_type
+
+        parsed = urlparse(source)
+        if parsed.scheme.lower() in {"http", "https"}:
+            logger.info(f"[{self.config.id}] 正在下载网络参考图并转码...")
+            headers = {"User-Agent": "Mozilla/5.0"}
+            current_url = source
+            for redirect_count in range(4):
+                await asyncio.to_thread(_validate_remote_reference_url, current_url)
+                async with self.session.get(
+                    current_url,
+                    headers=headers,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as response:
+                    if 300 <= response.status < 400:
+                        location = str(response.headers.get("Location", "") or "").strip()
+                        if not location or redirect_count >= 3:
+                            raise RuntimeError("参考图重定向次数过多或缺少目标地址")
+                        current_url = urljoin(current_url, location)
+                        continue
+                    if response.status != 200:
+                        raise RuntimeError(f"参考图下载失败，服务器返回状态码: {response.status}")
+                    response_headers = getattr(response, "headers", None) or {}
+                    mime_type = _validated_image_content_type(
+                        current_url,
+                        response_headers.get("Content-Type", ""),
+                    )
+                    payload = await read_response_bytes_limited(response, max_bytes=MAX_REFERENCE_IMAGE_BYTES)
+                    return _validate_image_payload(payload, mime_type, current_url), mime_type
+            raise RuntimeError("参考图重定向次数过多")
+
+        if not os.path.exists(source):
+            raise RuntimeError(f"本地参考图不存在: {source}")
+        if not os.path.isfile(source):
+            raise RuntimeError(f"本地参考图不是普通文件: {source}")
+        if os.path.islink(source):
+            raise RuntimeError(f"本地参考图不允许使用符号链接: {source}")
+        file_size = os.path.getsize(source)
+        if file_size > MAX_REFERENCE_IMAGE_BYTES:
+            raise RuntimeError(f"单张参考图超过 {MAX_REFERENCE_IMAGE_BYTES} 字节上限")
+        mime_type = _validated_image_content_type(source)
+        with open(source, "rb") as image_file:
+            payload = image_file.read(MAX_REFERENCE_IMAGE_BYTES + 1)
+        if len(payload) > MAX_REFERENCE_IMAGE_BYTES:
+            raise RuntimeError(f"单张参考图超过 {MAX_REFERENCE_IMAGE_BYTES} 字节上限")
+        return _validate_image_payload(payload, mime_type, source), mime_type
+
+    async def load_reference_images(
+        self,
+        refs: List[str],
+        max_images: int = MAX_REFERENCE_IMAGES,
+    ) -> List[Tuple[bytes, str]]:
+        if len(refs) > max_images:
+            raise ValueError(f"单次请求最多支持 {max_images} 张参考图。")
+
+        loaded = []
+        total_bytes = 0
+        for index, ref in enumerate(refs, start=1):
+            try:
+                payload, mime_type = await self.read_reference_image(ref)
+            except Exception as exc:
+                raise RuntimeError(f"读取第 {index} 张参考图数据失败: {exc}")
+            total_bytes += len(payload)
+            if total_bytes > MAX_REFERENCE_TOTAL_BYTES:
+                raise RuntimeError(f"参考图总大小超过 {MAX_REFERENCE_TOTAL_BYTES} 字节上限")
+            loaded.append((payload, mime_type))
+        return loaded
 
     def encode_local_image_to_base64(self, image_path: str) -> Optional[str]:
         """将本地图片文件转为 API 兼容的 Base64 字符串"""
-        if not image_path or not os.path.exists(image_path):
+        if not image_path or not os.path.isfile(image_path):
             return None
 
         logger.info(f"[{self.config.id}] 正在将本地参考图转为 Base64: {image_path}")
         try:
+            if os.path.getsize(image_path) > MAX_REFERENCE_IMAGE_BYTES:
+                raise RuntimeError(f"单张参考图超过 {MAX_REFERENCE_IMAGE_BYTES} 字节上限")
+            if os.path.islink(image_path):
+                raise RuntimeError("本地参考图不允许使用符号链接")
+            mime_type = _validated_image_content_type(image_path)
             with open(image_path, "rb") as image_file:
-                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-                mime_type = guess_image_content_type(image_path)
+                payload = image_file.read(MAX_REFERENCE_IMAGE_BYTES + 1)
+                if len(payload) > MAX_REFERENCE_IMAGE_BYTES:
+                    raise RuntimeError(f"单张参考图超过 {MAX_REFERENCE_IMAGE_BYTES} 字节上限")
+                _validate_image_payload(payload, mime_type, image_path)
+                encoded_string = base64.b64encode(payload).decode('utf-8')
                 return f"data:{mime_type};base64,{encoded_string}"
         except Exception as e:
             logger.error(f"❌ 读取本地图片失败: {e}")

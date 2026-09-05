@@ -2,11 +2,14 @@
 import json
 import re
 import aiohttp
-import asyncio
 from typing import Optional
 from astrbot.api import logger
 from ..models import PluginConfig
-from ..providers.base import build_chat_completions_endpoint, next_api_key
+from ..constants import APIType
+from ..providers.base import build_chat_completions_endpoint, next_api_key, read_response_text_limited
+
+MAX_OPTIMIZER_RESPONSE_BYTES = 256 * 1024
+
 
 class PromptOptimizer:
     def __init__(self, config: PluginConfig):
@@ -16,15 +19,23 @@ class PromptOptimizer:
         if not getattr(self.config, "enable_optimizer", True):
             return [raw_action] * count
 
-        if not raw_action or raw_action.strip() == "": return [raw_action] * count
+        if not raw_action or raw_action.strip() == "":
+            return [raw_action] * count
 
         chain = self.config.chains.get("optimizer", [])
         provider = self.config.get_provider(chain[0]) if chain else (self.config.providers[0] if self.config.providers else None)
         if not provider or not provider.base_url:
             return [raw_action] * count
+        if provider.api_type == APIType.GEMINI_OFFICIAL:
+            logger.warning("⚠️ [副脑] Gemini 官方节点不兼容 OpenAI Chat 优化协议，已跳过副脑优化。")
+            return [raw_action] * count
 
         endpoint = build_chat_completions_endpoint(provider.base_url)
-        api_key = next_api_key(provider.id, provider.api_keys)
+        api_key = next_api_key(
+            provider.id,
+            provider.api_keys,
+            scope=f"optimizer:{provider.api_type}:{provider.base_url}",
+        )
         if not endpoint or not api_key:
             return [raw_action] * count
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -170,28 +181,72 @@ OUTPUT FORMAT:
 
                 async with session_obj.post(endpoint, headers=headers, json=payload, timeout=timeout_val) as resp:
                     resp.raise_for_status()
-                    data = await resp.json()
+                    response_text = await read_response_text_limited(
+                        resp,
+                        max_bytes=MAX_OPTIMIZER_RESPONSE_BYTES,
+                    )
+                    data = json.loads(response_text)
 
-                    if "choices" in data and len(data["choices"]) > 0:
+                    if isinstance(data, dict) and "choices" in data and len(data["choices"]) > 0:
                         raw_content = data["choices"][0]["message"]["content"].strip()
-
-                        start_idx = raw_content.find('{')
-                        end_idx = raw_content.rfind('}')
-                        clean_json_str = raw_content[start_idx:end_idx+1] if (start_idx != -1 and end_idx != -1 and end_idx >= start_idx) else raw_content
-
-                        clean_json_str = clean_json_str.replace('\n', ' ').replace('\r', '')
-                        clean_json_str = re.sub(r',\s*}', '}', clean_json_str)
-                        clean_json_str = re.sub(r',\s*]', ']', clean_json_str)
 
                         items = []
                         try:
-                            prompt_data = json.loads(clean_json_str)
-                            if count == 1:
-                                items = [prompt_data]
+                            clean_json_str = raw_content.strip()
+                            fenced_json = re.fullmatch(
+                                r"```(?:json)?\s*(.*?)\s*```",
+                                clean_json_str,
+                                flags=re.IGNORECASE | re.DOTALL,
+                            )
+                            if fenced_json:
+                                clean_json_str = fenced_json.group(1).strip()
+
+                            try:
+                                prompt_data = json.loads(clean_json_str)
+                            except json.JSONDecodeError as original_error:
+                                prompt_data = None
+                                decoder = json.JSONDecoder()
+                                for match in re.finditer(r"[\[{]", clean_json_str):
+                                    try:
+                                        candidate, _ = decoder.raw_decode(clean_json_str[match.start():])
+                                    except json.JSONDecodeError:
+                                        continue
+                                    if isinstance(candidate, (dict, list)):
+                                        prompt_data = candidate
+                                        break
+
+                                for match in re.finditer(r"[\[{]", clean_json_str):
+                                    if prompt_data is not None:
+                                        break
+                                    opener = match.group(0)
+                                    closer = "]" if opener == "[" else "}"
+                                    end_idx = clean_json_str.rfind(closer)
+                                    if end_idx < match.start():
+                                        continue
+                                    candidate = clean_json_str[match.start():end_idx + 1]
+                                    repaired_candidate = candidate.replace('\n', ' ').replace('\r', '')
+                                    repaired_candidate = re.sub(r',\s*}', '}', repaired_candidate)
+                                    repaired_candidate = re.sub(r',\s*]', ']', repaired_candidate)
+                                    for candidate_text in (candidate, repaired_candidate):
+                                        try:
+                                            prompt_data = json.loads(candidate_text)
+                                            break
+                                        except json.JSONDecodeError:
+                                            continue
+                                    if prompt_data is not None:
+                                        break
+                                if prompt_data is None:
+                                    raise original_error
+
+                            if isinstance(prompt_data, list):
+                                items = prompt_data
+                            elif isinstance(prompt_data, dict):
+                                if count == 1:
+                                    items = [prompt_data]
+                                else:
+                                    items = prompt_data.get("results", [])
                             else:
-                                items = prompt_data.get("results", [])
-                                if not items and isinstance(prompt_data, list):
-                                    items = prompt_data
+                                raise ValueError("副脑返回 JSON 不是对象或数组")
                         except Exception as e:
                             logger.warning(f"⚠️ [副脑] 原生 JSON 解析失败, 启动无敌抢救模式... 错误: {e}")
                             fallback_item = {}
@@ -232,7 +287,7 @@ OUTPUT FORMAT:
                         results = []
                         anti_collage = "single image, one natural coherent frame, no grid, no collage, no split screen, no multiple views"
 
-                        for item in items:
+                        for item in items[:count]:
                             if isinstance(item, dict):
                                 parts = []
                                 for k in ["subject_appearance", "clothing_and_accessories", "pose_and_action", "environment_and_scene", "lighting_and_mood", "technical_specs", "realism_and_quality_guardrails"]:

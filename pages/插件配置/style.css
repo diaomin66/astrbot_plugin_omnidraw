@@ -288,6 +288,7 @@ body.is-dirty .save-state {
     z-index: 2;
     scrollbar-width: thin;
     scrollbar-color: rgba(143, 155, 168, 0.4) transparent;
+    contain: layout paint;
 }
 
 .topbar {
@@ -320,6 +321,13 @@ body.is-dirty .save-state {
     letter-spacing: 0;
 }
 
+.topbar-caption {
+    margin: 9px 0 0;
+    color: var(--text-soft);
+    font-size: 13px;
+    font-weight: 560;
+}
+
 .status-pill {
     display: inline-flex;
     align-items: center;
@@ -335,6 +343,11 @@ body.is-dirty .save-state {
     font-weight: 900;
 }
 
+.status-pill strong {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+}
+
 .tab-pane {
     display: none;
     opacity: 0;
@@ -344,6 +357,27 @@ body.is-dirty .save-state {
 .tab-pane.active {
     display: block;
     animation: paneIn 460ms cubic-bezier(0.18, 1.18, 0.28, 1) forwards;
+}
+
+.content[aria-busy="true"] .tab-pane.active {
+    pointer-events: none;
+}
+
+.content[aria-busy="true"] .card,
+.content[aria-busy="true"] .node-card {
+    opacity: 0.72;
+}
+
+.noscript-banner {
+    position: fixed;
+    inset: 16px;
+    z-index: 20;
+    padding: 16px 18px;
+    border: 1px solid var(--danger);
+    border-radius: var(--radius-md);
+    color: #7f1d1d;
+    background: #fee2e2;
+    font-weight: 700;
 }
 
 @keyframes paneIn {
@@ -420,6 +454,8 @@ body.is-dirty .save-state {
 .card {
     margin-bottom: 30px;
     padding: 35px;
+    content-visibility: auto;
+    contain-intrinsic-size: 320px;
 }
 
 .card:hover,
