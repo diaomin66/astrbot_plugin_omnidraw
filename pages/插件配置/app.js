@@ -38,6 +38,7 @@ const mockConfig = {
     },
     optimizer_config: {
         enable_optimizer: true,
+        use_astrbot_provider: false,
         optimizer_style: "手机日常原生感",
         chain_optimizer: "node_1",
         optimizer_model: "gpt-4o-mini",
@@ -967,6 +968,7 @@ function bindBasicFields() {
     byId("route_video").value = routePrimary("video") || "video_node_1";
     bindPersonaFields();
     byId("opt_enable").checked = Boolean(state.optimizer_config.enable_optimizer);
+    byId("opt_astrbot").checked = Boolean(state.optimizer_config.use_astrbot_provider);
     byId("opt_style").value = state.optimizer_config.optimizer_style || "手机日常原生感";
     byId("opt_chain").value = state.optimizer_config.chain_optimizer || "node_1";
     byId("opt_model").value = state.optimizer_config.optimizer_model || "gpt-4o-mini";
@@ -1004,6 +1006,7 @@ function readBasicFields() {
     syncRouteFromHidden("video");
     writeActivePersonaFieldsFromForm();
     state.optimizer_config.enable_optimizer = byId("opt_enable").checked;
+    state.optimizer_config.use_astrbot_provider = byId("opt_astrbot").checked;
     state.optimizer_config.optimizer_style = byId("opt_style").value;
     state.optimizer_config.chain_optimizer = byId("opt_chain").value.trim();
     state.optimizer_config.optimizer_model = byId("opt_model").value.trim();
@@ -1201,6 +1204,12 @@ function deletePersona(index) {
 function setupEventDelegation() {
     const fileInput = byId("hidden-file-input");
     const pressableSelector = ".nav-item, .btn-primary, .btn-secondary, .btn-glass-secondary, .btn-ghost, .upload-trigger, .selector-chip, .api-chip, .persona-profile-chip";
+
+    window.addEventListener("beforeunload", (event) => {
+        if (!dirtyState) return;
+        event.preventDefault();
+        event.returnValue = "";
+    });
 
     document.body.addEventListener("pointerdown", (e) => {
         const target = e.target.closest(pressableSelector);
@@ -1506,6 +1515,7 @@ async function init() {
     state.persona_config = normalizePersonaProfiles(pers);
 
     state.optimizer_config.enable_optimizer = deepFind(opt, ["enable_optimizer"], true);
+    state.optimizer_config.use_astrbot_provider = deepFind(opt, ["use_astrbot_provider"], false);
     state.optimizer_config.optimizer_style = deepFind(opt, ["optimizer_style"], "手机日常原生感");
     state.optimizer_config.chain_optimizer = deepFind(opt, ["chain_optimizer"], "node_1");
     state.optimizer_config.optimizer_model = deepFind(opt, ["optimizer_model"], "gpt-4o-mini");

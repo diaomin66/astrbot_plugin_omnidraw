@@ -375,6 +375,12 @@
         "type": "bool",
         "default": true
       },
+      "use_astrbot_provider": {
+        "description": "使用 AstrBot 当前文本模型",
+        "type": "bool",
+        "hint": "开启后副脑通过 AstrBot 的当前 Chat Provider 生成提示词，不再把图像节点地址拼成 /v1/chat/completions。",
+        "default": false
+      },
       "optimizer_style": {
         "description": "内置风格",
         "type": "string",

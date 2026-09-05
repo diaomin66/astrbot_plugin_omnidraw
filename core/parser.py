@@ -1,6 +1,10 @@
 import re
 from typing import Tuple, Dict, Any
 
+# 以空格紧接 -- 作为分割前瞻，防止截断普通文本里的连字符（如 mid-journey）。预编译避免每次解析重复编译。
+_PARAM_SPLIT_RE = re.compile(r'(?=\s--[a-zA-Z0-9_-]+)')
+
+
 class CommandParser:
     def parse(self, message: str) -> Tuple[str, Dict[str, Any]]:
         """
@@ -8,8 +12,7 @@ class CommandParser:
         精准切分提示词与 --key value 参数
         """
         kwargs = {}
-        # 以空格紧接 -- 作为分割前瞻，防止截断普通文本里的普通连字符 (如 mid-journey)
-        parts = re.split(r'(?=\s--[a-zA-Z0-9_-]+)', " " + message)
+        parts = _PARAM_SPLIT_RE.split(" " + message)
         
         prompt = parts[0].strip()
         

@@ -4,6 +4,8 @@
 
 交流与反馈：**[点击加入 QQ 群 1081773675](https://qm.qq.com/q/Qr45Vz0a8o)**
 
+推荐香蕉（nano-banana谷歌最强生图模型系列）以及gpt-image-2（支持4K）中转站：**[Meinianda AI](https://meinianda.top)**
+
 ---
 
 ## 效果图
