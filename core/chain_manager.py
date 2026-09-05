@@ -96,7 +96,7 @@ class ChainManager:
                 error_detail = repr(e)
                 last_error = error_detail
                 logger.error(f"❌ [Chain] 节点 [{provider_id}] 发生异常: {error_detail}", exc_info=True)
-                logger.warning("🔄 正在尝试切换到下一个备用节点...")
+                logger.warning(f"🔄 正在尝试切换到下一个备用节点...")
                 continue
 
         failure_detail = last_error or "；".join(skipped_errors) or "没有可尝试的有效节点"
