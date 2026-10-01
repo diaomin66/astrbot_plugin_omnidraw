@@ -55,7 +55,7 @@ class OpenAIProvider(BaseProvider):
             data = aiohttp.FormData()
             for idx, (image_bytes, mime_type) in enumerate(loaded_refs, start=1):
                 data.add_field(
-                    "image",
+                    "image[]",
                     image_bytes,
                     filename=f"reference_{idx}.png",
                     content_type=mime_type,
