@@ -6,7 +6,7 @@ from typing import Any
 
 import aiohttp
 from astrbot.api import logger
-from ..constants import APIType
+from ..constants import APIType, aspect_ratio_to_size
 from ..models import PluginConfig
 from ..providers import create_provider
 
@@ -38,6 +38,18 @@ class ChainManager:
             return request_kwargs
         if str(request_kwargs.get("resolution", "") or "").strip():
             return request_kwargs
+
+        # OpenAI 标准接口只认 size，直接透传 aspect_ratio 会被上游拒绝
+        # （Unknown parameter: 'aspect_ratio'）。调用方只给 aspect_ratio 时静默换算。
+        if getattr(provider_config, "api_type", None) in (
+            APIType.OPENAI_IMAGE,
+            APIType.OPENAI_CHAT,
+        ):
+            mapped_size = aspect_ratio_to_size(request_kwargs.get("aspect_ratio", ""))
+            if mapped_size:
+                request_kwargs["size"] = mapped_size
+                request_kwargs.pop("aspect_ratio", None)
+                return request_kwargs
 
         default_size = str(getattr(provider_config, "default_size", "") or "").strip()
         if default_size:
