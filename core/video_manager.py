@@ -165,7 +165,8 @@ class VideoManager:
                     )
                 mime_type = header[5:].split(";", 1)[0].strip() or "image/png"
                 _validate_image_payload(decoded, mime_type, "data URL")
-                return image_ref
+                image_bytes = decoded
+                content_type = mime_type
             if image_ref.lower().startswith(("http://", "https://")):
                 logger.info("📥 正在下载视频参考图并转码 Base64...")
                 headers = {"User-Agent": "Mozilla/5.0"}
@@ -234,6 +235,25 @@ class VideoManager:
                 _validate_image_payload(image_bytes, content_type, image_ref)
             else:
                 raise VideoTaskError(f"视频参考图不存在: {image_ref}")
+            try:
+                import io
+                from PIL import Image
+                with Image.open(io.BytesIO(image_bytes)) as pil_img:
+                    if pil_img.mode != "RGB":
+                        if pil_img.mode in ("RGBA", "LA") or ("transparency" in pil_img.info):
+                            alpha = pil_img.convert("RGBA")
+                            bg = Image.new("RGB", alpha.size, (255, 255, 255))
+                            bg.paste(alpha, mask=alpha.split()[3])
+                            pil_img = bg
+                        else:
+                            pil_img = pil_img.convert("RGB")
+                    out_buf = io.BytesIO()
+                    pil_img.save(out_buf, format="JPEG", quality=95)
+                    image_bytes = out_buf.getvalue()
+                    content_type = "image/jpeg"
+            except Exception as conv_err:
+                logger.warning(f"⚠️ 参考图转码 JPEG 异常，保留原格式: {conv_err}")
+
             return f"data:{content_type};base64," + base64.b64encode(image_bytes).decode("utf-8")
         except asyncio.CancelledError:
             raise
