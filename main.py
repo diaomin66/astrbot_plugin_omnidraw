@@ -733,7 +733,7 @@ class OmniDrawPlugin(Star):
         for legacy_key in LEGACY_PERSONA_CONFIG_KEYS:
             self.raw_config.pop(legacy_key, None)
         self.persona_manager = PersonaManager(self.plugin_config)
-        self.video_manager = VideoManager(self.plugin_config)
+        self.video_manager = VideoManager(self.plugin_config, self.data_dir)
         self.prompt_optimizer = PromptOptimizer(self.plugin_config)
         self._restart_cache_cleanup_task()
         self._prune_cache_if_needed("config_reload")

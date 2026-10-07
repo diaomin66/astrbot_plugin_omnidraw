@@ -1,6 +1,6 @@
 import ast
 import asyncio
-import base64
+import base64, os
 import importlib
 import json
 import sys
@@ -58,6 +58,10 @@ class _Video:
     @classmethod
     def fromURL(cls, url):
         return {"type": "video", "url": url}
+
+    @classmethod
+    def fromFileSystem(cls, path):
+        return {"type": "video_file", "path": path}
 
 
 class _Image:
@@ -3261,3 +3265,47 @@ class ReliabilityBoundaryRegressionTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VideoBase64HandlingTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.config = PluginConfig.from_dict({}, str(PLUGIN_DIR))
+        self.manager = VideoManager(self.config, data_dir=str(PLUGIN_DIR))
+
+    def test_extract_url_with_http_url(self):
+        text = "Here is your video: https://example.com/video.mp4 enjoy!"
+        self.assertEqual(self.manager._extract_url(text), "https://example.com/video.mp4")
+
+    def test_extract_url_with_markdown_data_uri(self):
+        b64_data = "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAABg="
+        text = f"[media](data:video/mp4;base64,{b64_data})"
+        expected = f"data:video/mp4;base64,{b64_data}"
+        self.assertEqual(self.manager._extract_url(text), expected)
+
+    def test_extract_url_with_raw_data_uri(self):
+        b64_data = "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAABg="
+        text = f"data:video/webm;base64,{b64_data}"
+        self.assertEqual(self.manager._extract_url(text), text)
+
+    async def test_build_video_component_with_data_uri_saves_file(self):
+        import base64, os
+        test_bytes = b"fake-mp4-video-content"
+        b64_str = base64.b64encode(test_bytes).decode("ascii")
+        data_uri = f"data:video/mp4;base64,{b64_str}"
+
+        component = await self.manager._build_video_component(data_uri, None)
+        self.assertEqual(component["type"], "video_file")
+        saved_path = component["path"]
+        self.assertTrue(os.path.exists(saved_path))
+        with open(saved_path, "rb") as f:
+            self.assertEqual(f.read(), test_bytes)
+        try:
+            os.remove(saved_path)
+        except OSError:
+            pass
+
+    async def test_build_video_component_with_http_url(self):
+        url = "https://example.com/my_video.mp4"
+        component = await self.manager._build_video_component(url, None)
+        self.assertEqual(component["type"], "video")
+        self.assertEqual(component["url"], url)
