@@ -15,6 +15,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Plain, Video
 
 from ..models import PluginConfig, ProviderConfig
+from ..utils import split_data_url
 from ..providers.base import (
     MAX_REFERENCE_IMAGE_BYTES,
     _validate_image_payload,
@@ -39,8 +40,9 @@ class VideoTaskError(Exception):
 
 
 class VideoManager:
-    def __init__(self, config: PluginConfig):
+    def __init__(self, config: PluginConfig, data_dir: Optional[str] = None):
         self.config = config
+        self.data_dir = data_dir
 
     def _get_video_provider_chain(self) -> List[ProviderConfig]:
         chain = self.config.chains.get("video", [])
@@ -67,7 +69,12 @@ class VideoManager:
         return api_key
 
     def _extract_url(self, text: str) -> str:
-        match = re.search(r"(https?://[^\s\]\)\"']+)", text or "")
+        text = str(text or "")
+        data_match = re.search(r"(data:video/[a-zA-Z0-9.\-_+]+;base64,[A-Za-z0-9+/=]+)", text)
+        if data_match:
+            return data_match.group(1)
+
+        match = re.search(r"(https?://[^\s\]\)\"'>]+)", text)
         if not match:
             return ""
         candidate = match.group(1).rstrip(".,;:!?，。；：！？>")
@@ -75,6 +82,27 @@ class VideoManager:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return ""
         return candidate
+
+    async def _build_video_component(self, video_url: str, session: aiohttp.ClientSession) -> Video:
+        if video_url.startswith("data:video/") or ";base64," in video_url:
+            raw_bytes, content_type = split_data_url(video_url)
+            ext = "mp4"
+            if content_type:
+                sub = content_type.split("/")[-1].split(";")[0].strip().lower()
+                if sub in {"mp4", "webm", "avi", "mov", "mkv"}:
+                    ext = sub
+            save_dir = os.path.join(self.data_dir, "temp_images") if self.data_dir else "/tmp"
+            os.makedirs(save_dir, exist_ok=True)
+            filename = f"video_{int(time.time() * 1000)}_{os.urandom(4).hex()}.{ext}"
+            file_path = os.path.join(save_dir, filename)
+            with open(file_path, "wb") as f:
+                f.write(raw_bytes)
+            logger.info(f"💾 [视频链路] Base64 视频已保存至本地: {file_path} ({len(raw_bytes)} 字节)")
+            return Video.fromFileSystem(file_path)
+        if video_url.startswith("file://") or (os.path.isabs(video_url) and os.path.exists(video_url)):
+            clean_path = video_url[7:] if video_url.startswith("file://") else video_url
+            return Video.fromFileSystem(clean_path)
+        return Video.fromURL(video_url)
 
     def _chat_endpoint(self, base_url: str) -> str:
         return build_chat_completions_endpoint(base_url)
@@ -411,8 +439,21 @@ class VideoManager:
             if not isinstance(data, dict):
                 raise VideoTaskError("Chat 接口返回的 JSON 不是对象。")
             if data.get("choices"):
-                raw_content = data["choices"][0].get("message", {}).get("content", "")
-                return self._extract_url(str(raw_content))
+                msg_obj = data["choices"][0].get("message", {})
+                raw_content = msg_obj.get("content", "")
+                if isinstance(raw_content, list):
+                    pieces = []
+                    for part in raw_content:
+                        if isinstance(part, dict):
+                            pieces.append(part.get("text", "") or part.get("video_url", {}).get("url", "") or str(part))
+                        else:
+                            pieces.append(str(part))
+                    raw_content = " ".join(pieces)
+                elif isinstance(raw_content, dict):
+                    raw_content = str(raw_content)
+                url = self._extract_url(str(raw_content))
+                if url:
+                    return url
             raise VideoTaskError(
                 "Chat 返回值异常: " + summarize_payload_json_for_log(data, max_string_length=500)
             )
@@ -474,7 +515,7 @@ class VideoManager:
                                     self._effective_request_model(provider, request_kwargs),
                                     include_metadata=include_metadata,
                                 )),
-                                Video.fromURL(video_url),
+                                await self._build_video_component(video_url, session),
                             ]))
                         except asyncio.CancelledError:
                             logger.warning("⚠️ [后台任务] 视频任务在发送成功结果时被取消。")
