@@ -56,6 +56,7 @@ from .constants import (
     MAX_IMAGE_BYTES,
     MessageEmoji,
 )
+from .core.auto_persona import select_selfie_persona
 from .core.chain_manager import ChainManager, ChainRunResult
 from .core.parser import CommandParser
 from .core.persona_manager import PersonaManager
@@ -98,34 +99,39 @@ PRESET_VIEW_COMMANDS = ("查看预设",)
 PRESET_LIST_COMMANDS = ("查看预设", "极速宏")
 PRESET_ADD_COMMANDS = ("添加预设",)
 PRESET_DELETE_COMMANDS = ("删除预设",)
-RESERVED_PRESET_NAMES = frozenset({
-    "万象帮助",
-    "查看预设",
-    "极速宏",
-    "添加预设",
-    "删除预设",
-    "清理缓存",
-    "签到",
-    "人设",
-    "切换人设",
-    "切换链路",
-    "切换模型",
-    "画",
-    "自拍",
-    "视频",
-})
-RESERVED_GENERATION_PARAM_KEYS = frozenset({
-    "user_refs",
-    "user_ref",
-    "persona_refs",
-    "persona_ref",
-    "n",
-    "stream",
-    "messages",
-    "input",
-    "prompt",
-    "tools",
-})
+RESERVED_PRESET_NAMES = frozenset(
+    {
+        "万象帮助",
+        "查看预设",
+        "极速宏",
+        "添加预设",
+        "删除预设",
+        "清理缓存",
+        "签到",
+        "人设",
+        "切换人设",
+        "切换链路",
+        "切换模型",
+        "画",
+        "自拍",
+        "视频",
+    }
+)
+RESERVED_GENERATION_PARAM_KEYS = frozenset(
+    {
+        "persona_id",
+        "user_refs",
+        "user_ref",
+        "persona_refs",
+        "persona_ref",
+        "n",
+        "stream",
+        "messages",
+        "input",
+        "prompt",
+        "tools",
+    }
+)
 LEGACY_PERSONA_CONFIG_KEYS = (
     "persona_name",
     "persona_base_prompt",
@@ -134,6 +140,7 @@ LEGACY_PERSONA_CONFIG_KEYS = (
 )
 LEGACY_PROVIDER_API_KEY_KEYS = ("API密钥",)
 CONFIG_KEYS = {
+    "auto_persona_config",
     "permission_config",
     "persona_config",
     "optimizer_config",
@@ -227,6 +234,12 @@ class OmniDrawPlugin(Star):
             self.generate_image_for_plugin_handler,
             ["POST"],
             "为其他插件生成图片并返回结果",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/resolve_selfie_context",
+            self.resolve_selfie_context_handler,
+            ["POST"],
+            "预览自动自拍人设选择",
         )
 
     def _resolve_data_dir(self) -> str:
@@ -583,6 +596,16 @@ class OmniDrawPlugin(Star):
     def _has_config_payload(self, config: Dict[str, Any]) -> bool:
         if not isinstance(config, dict):
             return False
+        automatic = config.get("auto_persona_config", {})
+        if isinstance(automatic, dict) and (
+            automatic.get("enabled")
+            or any(
+                str(value or "").strip()
+                for key, value in automatic.items()
+                if key.endswith("_persona_id")
+            )
+        ):
+            return True
         if config.get("providers") or config.get("video_providers") or config.get("presets"):
             return True
         if config.get("verbose_report"):
@@ -1014,11 +1037,18 @@ class OmniDrawPlugin(Star):
                 size=str(payload.get("size", payload.get("resolution", "")) or ""),
                 extra_params=extra_params_value,
                 refs=payload.get("refs", payload.get("user_refs", [])),
-                mode="selfie" if "selfie" in payload and self._plugin_bool(payload.get("selfie"), default=False) else str(
-                    payload.get("mode", payload.get("chain_type", payload.get("type", ""))) or ""
+                mode="selfie"
+                if "selfie" in payload
+                and self._plugin_bool(payload.get("selfie"), default=False)
+                else str(
+                    payload.get(
+                        "mode", payload.get("chain_type", payload.get("type", ""))
+                    )
+                    or ""
                 ),
                 event=None,
                 record_usage=False,
+                persona_id=str(payload.get("persona_id", "") or ""),
             )
             status_code = 200 if result.get("success") else 500
             return jsonify(result), status_code
@@ -2755,6 +2785,93 @@ class OmniDrawPlugin(Star):
             "chain": "text2img",
         }
 
+    async def resolve_selfie_context_handler(self):
+        """Preview persona routing without generating or sending an image.
+
+        Returns:
+            Selected persona metadata, or a validation error response.
+        """
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(
+                {"success": False, "message": "Request must be an object"}
+            ), 400
+        context = payload.get("life_context")
+        if context is not None and not isinstance(context, dict):
+            return jsonify(
+                {"success": False, "message": "life_context must be an object"}
+            ), 400
+        action = str(payload.get("action", "") or "")
+        if len(action) > MAX_PROMPT_CHARS:
+            return jsonify({"success": False, "message": "Action is too long"}), 400
+        try:
+            result = await self.resolve_selfie_context(
+                action,
+                persona_id=str(payload.get("persona_id", "") or ""),
+                life_context=context,
+            )
+        except ValueError as exc:
+            return jsonify({"success": False, "message": str(exc)}), 400
+        return jsonify({"success": True, **result})
+
+    async def resolve_selfie_context(
+        self,
+        action: str = "",
+        *,
+        persona_id: str = "",
+        life_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Choose references and outfit for a request without a global switch.
+
+        Args:
+            action: Explicit user request or the current image action.
+            persona_id: Optional exact persona ID, name, or number.
+            life_context: Schedule context already fetched by another plugin.
+
+        Returns:
+            Persona metadata and a separate schedule context for prompt writing.
+
+        Raises:
+            ValueError: The explicit persona selector does not exist.
+        """
+        self._refresh_from_native_config_if_changed()
+        settings = copy.deepcopy(self.raw_config.get("auto_persona_config", {}))
+        config = self.plugin_config
+        wardrobe = []
+        if settings.get("enabled") and settings.get("use_life_scheduler", True):
+            getter = getattr(self.context, "get_registered_star", None)
+            metadata = (
+                getter("astrbot_plugin_life_scheduler") if callable(getter) else None
+            )
+            plugin = getattr(metadata, "star_cls", None)
+            if plugin is not None:
+                try:
+                    if life_context is None:
+                        life_context = await plugin.get_life_context(
+                            allow_generate=False
+                        )
+                    manager = getattr(plugin, "wardrobe_mgr", None)
+                    wardrobe = manager.all() if manager is not None else []
+                except Exception as exc:  # noqa: BLE001 - Optional plugin failures must not prevent selfies.
+                    logger.warning(
+                        "[OmniDraw] Cached life context unavailable: %s", exc
+                    )
+        result = select_selfie_persona(
+            settings,
+            [profile.to_config_dict() for profile in config.personas],
+            config.active_persona_id,
+            action,
+            life_context=life_context,
+            wardrobe=wardrobe,
+            persona_id=persona_id,
+        )
+        logger.info(
+            "[OmniDraw] Selfie persona selected: id=%s reason=%s",
+            result["persona_id"],
+            result["selection_reason"],
+        )
+        return result
+
     async def _run_selfie_generation(
         self,
         event: Optional[AstrMessageEvent],
@@ -2764,7 +2881,43 @@ class OmniDrawPlugin(Star):
         size: str = "",
         extra_params: str = "",
         refs: Any = None,
+        persona_id: str = "",
+        selection: dict[str, Any] | None = None,
+        generation_kwargs: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
+        request_config = self.plugin_config
+        persona_manager = self.persona_manager
+        if (
+            selection
+            or persona_id
+            or getattr(self, "raw_config", {})
+            .get("auto_persona_config", {})
+            .get("enabled")
+        ):
+            selection = selection or await self.resolve_selfie_context(
+                action, persona_id=persona_id
+            )
+            request_config = self.plugin_config
+            profile = next(
+                p for p in request_config.personas if p.id == selection["persona_id"]
+            )
+            request_config = copy.copy(request_config)
+            request_config.active_persona_id = profile.id
+            request_config.persona_name = profile.name
+            request_config.persona_base_prompt = profile.base_prompt
+            request_config.persona_ref_images = list(profile.ref_images)
+            request_config.persona_ref_image = (
+                profile.ref_images[0] if profile.ref_images else ""
+            )
+            persona_manager = PersonaManager(request_config)
+            if selection.get("outfit_source") in {
+                "requested_activity",
+                "current_activity",
+                "daily_outfit",
+            }:
+                outfit = selection["life_context"].get("outfit", "")
+                if outfit:
+                    action += f"\nOutfit for this image: {outfit}"
         async with aiohttp.ClientSession() as session:
             fallback_action = action or "看着镜头微笑"
             optimized_actions = await self.prompt_optimizer.optimize(fallback_action, count, session=session)
@@ -2774,18 +2927,23 @@ class OmniDrawPlugin(Star):
                 if refs is not None
                 else (self._get_event_images(event) if event is not None else [])
             )
-            target_refs = raw_refs if raw_refs else self.plugin_config.persona_ref_images
+            target_refs = raw_refs if raw_refs else request_config.persona_ref_images
             safe_refs = await self._process_and_save_images(target_refs, session=session)
             leased_paths = self._lease_cache_paths(safe_refs)
             extra_param_kwargs = self._parse_extra_params(extra_params)
+            extra_param_kwargs.update(generation_kwargs or {})
 
             try:
-                chain_to_use = "selfie" if self.plugin_config.chains.get("selfie") else "text2img"
-                chain_manager = ChainManager(self.plugin_config, session)
+                chain_to_use = (
+                    "selfie" if request_config.chains.get("selfie") else "text2img"
+                )
+                chain_manager = ChainManager(request_config, session)
                 prompts = []
                 tasks = []
                 for optimized_action in optimized_actions:
-                    final_prompt, kwargs = self.persona_manager.build_persona_prompt(optimized_action)
+                    final_prompt, kwargs = persona_manager.build_persona_prompt(
+                        optimized_action
+                    )
                     if safe_refs:
                         kwargs["user_refs"] = safe_refs
                         if not raw_refs:
@@ -2801,7 +2959,7 @@ class OmniDrawPlugin(Star):
             finally:
                 self._release_cache_paths(leased_paths)
 
-        return {
+        generation = {
             "prompts": prompts,
             "results": results,
             "requested_count": count,
@@ -2810,6 +2968,14 @@ class OmniDrawPlugin(Star):
             "mode": "selfie",
             "chain": chain_to_use,
         }
+        if selection:
+            generation.update(
+                {
+                    key: selection[key]
+                    for key in ("persona_id", "persona_name", "selection_reason")
+                }
+            )
+        return generation
 
     def _plugin_generation_response(self, generation: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Any]]:
         images = []
@@ -2844,6 +3010,9 @@ class OmniDrawPlugin(Star):
             "mode": generation.get("mode", "text2img"),
             "chain": generation.get("chain", generation.get("mode", "text2img")),
         }
+        for key in ("persona_id", "persona_name", "selection_reason"):
+            if key in generation:
+                response[key] = generation[key]
         if errors:
             response["errors"] = errors
         return response, valid_results
@@ -2860,6 +3029,7 @@ class OmniDrawPlugin(Star):
         event: Optional[AstrMessageEvent] = None,
         record_usage: bool = False,
         allow_local_refs: bool = False,
+        persona_id: str = "",
     ) -> Dict[str, Any]:
         """Generate image(s) for another plugin and return serializable image data.
 
@@ -2896,6 +3066,7 @@ class OmniDrawPlugin(Star):
                     size=size,
                     extra_params=extra_params,
                     refs=raw_refs,
+                    persona_id=persona_id,
                 )
             else:
                 generation = await self._run_text2img_generation(
@@ -3466,20 +3637,54 @@ class OmniDrawPlugin(Star):
         fallback = " ".join(str(item) for item in [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10] if item).strip()
         message = self._extract_command_message(event, "自拍", fallback)
         user_input, kwargs = self.cmd_parser.parse(message)
+        persona_id = str(kwargs.pop("persona_id", kwargs.pop("persona", "")) or "")
         kwargs = self._sanitize_generation_kwargs(kwargs)
         user_input = user_input or "看着镜头微笑"
 
         try:
             started_at = time.perf_counter()
+            request_config = self.plugin_config
+            persona_manager = self.persona_manager
+            if persona_id or getattr(self, "raw_config", {}).get(
+                "auto_persona_config", {}
+            ).get("enabled"):
+                selected = await self.resolve_selfie_context(
+                    user_input, persona_id=persona_id
+                )
+                request_config = self.plugin_config
+                profile = next(
+                    p for p in request_config.personas if p.id == selected["persona_id"]
+                )
+                request_config = copy.copy(request_config)
+                request_config.active_persona_id = profile.id
+                request_config.persona_name = profile.name
+                request_config.persona_base_prompt = profile.base_prompt
+                request_config.persona_ref_images = list(profile.ref_images)
+                request_config.persona_ref_image = (
+                    profile.ref_images[0] if profile.ref_images else ""
+                )
+                persona_manager = PersonaManager(request_config)
+                if selected.get("outfit_source") in {
+                    "requested_activity",
+                    "current_activity",
+                    "daily_outfit",
+                }:
+                    outfit = selected["life_context"].get("outfit", "")
+                    if outfit:
+                        user_input += f"\nOutfit for this image: {outfit}"
             async with aiohttp.ClientSession() as session:
-                optimized_actions = await self.prompt_optimizer.optimize(user_input, count=1, session=session)
-                final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(
+                optimized_actions = await self.prompt_optimizer.optimize(
+                    user_input, count=1, session=session
+                )
+                final_prompt, extra_kwargs = persona_manager.build_persona_prompt(
                     optimized_actions[0] if optimized_actions else user_input
                 )
                 extra_kwargs.update(kwargs)
 
                 raw_refs = self._get_event_images(event)
-                target_refs = raw_refs if raw_refs else self.plugin_config.persona_ref_images
+                target_refs = (
+                    raw_refs if raw_refs else request_config.persona_ref_images
+                )
                 safe_refs = await self._process_and_save_images(target_refs, session=session)
                 if safe_refs:
                     extra_kwargs["user_refs"] = safe_refs
@@ -3495,7 +3700,7 @@ class OmniDrawPlugin(Star):
                     user_input=user_input,
                     ref_count=len(safe_refs),
                     param_count=len(kwargs),
-                    persona_name=self.plugin_config.persona_name,
+                    persona_name=request_config.persona_name,
                 )
                 if self.plugin_config.verbose_report:
                     msg += f"\n📝 构建提示词: {final_prompt}\n⚙️ 附加参数：{len(kwargs)} 个\n🖼️ 实际参考图：{len(safe_refs)} 张"
@@ -3504,8 +3709,10 @@ class OmniDrawPlugin(Star):
                     yield pending_result
 
                 try:
-                    chain_to_use = "selfie" if self.plugin_config.chains.get("selfie") else "text2img"
-                    chain_manager = ChainManager(self.plugin_config, session)
+                    chain_to_use = (
+                        "selfie" if request_config.chains.get("selfie") else "text2img"
+                    )
+                    chain_manager = ChainManager(request_config, session)
                     result = await chain_manager.run_chain_with_metadata(chain_to_use, final_prompt, **extra_kwargs)
                 finally:
                     self._release_cache_paths(leased_paths)
@@ -3586,9 +3793,10 @@ class OmniDrawPlugin(Star):
         extra_params: str = "",
         return_result: bool = False,
         refs: str = "",
+        persona_id: str = "",
     ) -> str:
         """
-        以此 AI 助理的固定人设拍摄自拍。
+        Generate a selfie with automatic clothing selection. Preserve explicit clothing and Q-version requests in action.
         Args:
             action (string): 动作、姿态、服装、场景或画面描述。
             count (int): 需要生成的图片数量。默认为 1。
@@ -3597,6 +3805,7 @@ class OmniDrawPlugin(Star):
             extra_params (string): 附加模型参数透传，格式为 --key value，可同时传多个。
             return_result (bool): 仅供其他插件显式调用时使用。为 true 时不自动下发图片，而是返回 JSON 图片结果。
             refs (string): 仅在 return_result 为 true 时使用。自拍参考图 URL、本地路径或 data URL；多个参考图可用换行分隔，也可传 JSON 数组字符串。
+            persona_id (string): Optional persona ID, name, or number; empty selects automatically from the requested clothes and current activity. Keep explicit Q-version requests in action.
         """
         permission_error = self._permission_denied_message(event)
         if permission_error:
@@ -3617,6 +3826,7 @@ class OmniDrawPlugin(Star):
                     event=event,
                     record_usage=True,
                     allow_local_refs=not explicit_refs,
+                    persona_id=persona_id,
                 )
                 return json.dumps(result, ensure_ascii=False)
             count = self._normalize_count(count)
@@ -3630,6 +3840,7 @@ class OmniDrawPlugin(Star):
                 aspect_ratio=aspect_ratio,
                 size=size,
                 extra_params=extra_params,
+                persona_id=persona_id,
             )
             valid_results = [result for result in generation["results"] if self._get_image_result_url(result)]
             if not valid_results:

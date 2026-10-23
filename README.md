@@ -338,6 +338,25 @@ Web API 返回同样的 JSON 结构。自拍模式可传 `{"mode": "selfie", "ac
 
 ---
 
+## 自动自拍人设选择
+
+先创建各套服装的人设和参考图，然后在 AstrBot 原生插件配置的“自动自拍人设选择”中开启功能。将成熟版、Q版、女仆、工装、水手服和睡衣的映射填为已有人设的 ID；未配置的映射回退到手动默认人设。功能默认关闭。
+
+选择顺序为：显式 `persona_id`、本次请求的服装、本次请求的活动、Life Scheduler 的当前活动、当天穿搭、手动默认人设。写代码或办公选工装，睡前或睡觉选睡衣；明确请求 Q版时使用 Q版比例，手动默认 Q版也会保持其比例。明确的服装要求仍保留在生图提示词中。全天日程中的未来活动不会参与选择。
+
+```text
+/自拍 在电脑前写代码
+/自拍 睡前喝水
+/自拍 Q版穿水手服喝咖啡
+/自拍 在窗边看书 --persona_id 2
+```
+
+`generate_selfie` 工具、`generate_images_for_plugin()` 和生图 Web API 均接受可选的 `persona_id`（ID、名称或一基编号）。每次请求独立使用选定人设的提示词和参考图，不切换全局默认人设，并发自拍可使用不同服装。
+
+外部插件可先调用 `await omnidraw.resolve_selfie_context(action, life_context=life_data)`，得到 `persona_id`、`persona_name`、`selection_reason` 和更新了穿搭的 `life_context`，再编写配图提示词和文案，并把同一个 `persona_id` 传入自拍。可选的 Life Scheduler 联动只读取缓存，不会为了选衣服额外生成日程。
+
+也可通过已登录 AstrBot 的 `POST /api/plug/astrbot_plugin_omnidraw/resolve_selfie_context` 预览选择；请求 JSON 包含 `action`、可选 `persona_id` 和可选 `life_context`。此接口不生图，不下发消息。插件配置网页保存其他项目时会保留自动选择配置。
+
 ## 常见问题
 
 ### 1. 保存配置后不生效怎么办？

@@ -361,7 +361,13 @@
         "type": "file",
         "hint": "这里用于 AstrBot 原生配置页上传图片。上传并保存后，插件会把文件同步到 active_persona_id 对应的人设参考图组；多个人设的参考图也可在上方人设列表中填写 paths/URL，或到 Pages / 插件配置中管理。",
         "default": [],
-        "file_types": ["png", "jpg", "jpeg", "webp", "gif"]
+        "file_types": [
+          "png",
+          "jpg",
+          "jpeg",
+          "webp",
+          "gif"
+        ]
       }
     }
   },
@@ -466,7 +472,13 @@
     "description": "旧版人设参考图（兼容字段）",
     "type": "file",
     "default": [],
-    "file_types": ["png", "jpg", "jpeg", "webp", "gif"],
+    "file_types": [
+      "png",
+      "jpg",
+      "jpeg",
+      "webp",
+      "gif"
+    ],
     "invisible": true
   },
   "persona_ref_images": {
@@ -474,5 +486,59 @@
     "type": "list",
     "default": [],
     "invisible": true
+  },
+  "auto_persona_config": {
+    "description": "自动自拍人设选择",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "自动选择自拍人设",
+        "type": "bool",
+        "default": false,
+        "hint": "本次请求明确的衣服优先，其次当前活动，最后当天穿搭；不修改手动默认人设。"
+      },
+      "use_life_scheduler": {
+        "description": "参考生活日程与衣柜",
+        "type": "bool",
+        "default": true,
+        "hint": "只读取已生成的日程；工作或写代码选工装，睡觉或睡前选睡衣。"
+      },
+      "mature_persona_id": {
+        "description": "成熟版默认人设 ID",
+        "type": "string",
+        "default": "",
+        "hint": "填写人设列表中对应的 id。Q版只在明确要求Q版或手动默认Q版时使用。"
+      },
+      "chibi_persona_id": {
+        "description": "Q版人设 ID",
+        "type": "string",
+        "default": "",
+        "hint": "填写人设列表中对应的 id。Q版只在明确要求Q版或手动默认Q版时使用。"
+      },
+      "maid_persona_id": {
+        "description": "女仆人设 ID",
+        "type": "string",
+        "default": "",
+        "hint": "填写人设列表中对应的 id。Q版只在明确要求Q版或手动默认Q版时使用。"
+      },
+      "workwear_persona_id": {
+        "description": "工装人设 ID",
+        "type": "string",
+        "default": "",
+        "hint": "填写人设列表中对应的 id。Q版只在明确要求Q版或手动默认Q版时使用。"
+      },
+      "sailor_persona_id": {
+        "description": "水手服人设 ID",
+        "type": "string",
+        "default": "",
+        "hint": "填写人设列表中对应的 id。Q版只在明确要求Q版或手动默认Q版时使用。"
+      },
+      "sleepwear_persona_id": {
+        "description": "睡衣人设 ID",
+        "type": "string",
+        "default": "",
+        "hint": "填写人设列表中对应的 id。Q版只在明确要求Q版或手动默认Q版时使用。"
+      }
+    }
   }
 }
