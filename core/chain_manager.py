@@ -6,7 +6,7 @@ from typing import Any
 
 import aiohttp
 from astrbot.api import logger
-from ..constants import APIType
+from ..constants import APIType, aspect_ratio_to_size
 from ..models import PluginConfig
 from ..providers import create_provider
 
@@ -38,6 +38,18 @@ class ChainManager:
             return request_kwargs
         if str(request_kwargs.get("resolution", "") or "").strip():
             return request_kwargs
+
+        # 仅标准图像通道按节点模型换算；Chat 中转站保留原有比例透传行为。
+        # model 是 Provider 保留参数，实际请求使用节点配置，不使用 kwargs 覆写。
+        if getattr(provider_config, "api_type", None) == APIType.OPENAI_IMAGE:
+            mapped_size = aspect_ratio_to_size(
+                request_kwargs.get("aspect_ratio", ""),
+                getattr(provider_config, "model", ""),
+            )
+            if mapped_size:
+                request_kwargs["size"] = mapped_size
+                request_kwargs.pop("aspect_ratio", None)
+                return request_kwargs
 
         default_size = str(getattr(provider_config, "default_size", "") or "").strip()
         if default_size:

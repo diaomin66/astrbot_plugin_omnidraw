@@ -1469,6 +1469,196 @@ class CommandPendingSendTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [("chain", [{"result": "https://cdn.example.com/draw.png"}])])
 
 
+class ChainManagerAspectRatioTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _config(*nodes):
+        providers = [
+            {
+                "api_type": "openai_image",
+                "base_url": "https://api.example.com/v1",
+                "api_keys": "test-key",
+                "model": "gpt-image-2",
+                **node,
+            }
+            for node in nodes
+        ]
+        return PluginConfig.from_dict({
+            "providers": providers,
+            "router_config": {"chain_text2img": ",".join(node["id"] for node in nodes)},
+        }, str(PLUGIN_DIR))
+
+    async def test_image_request_size_matches_configured_model(self):
+        cases = (
+            ("gpt-image-1", "16:9", "1536x1024"),
+            ("gpt-image-1", "4:3", "1536x1024"),
+            ("gpt-image-1", "9:16", "1024x1536"),
+            ("gpt-image-1", "1:1", "1024x1024"),
+            ("gpt-image-1-mini", "16:9", "1536x1024"),
+            ("gpt-image-1.5", "16:9", "1536x1024"),
+            ("gpt-image-2", "16:9", "1536x864"),
+            ("gpt-image-2", " 9：16 ", "864x1536"),
+            ("gpt-image-2-2026-04-21", "4:3", "1536x1152"),
+        )
+        for model, ratio, expected_size in cases:
+            with self.subTest(model=model, ratio=ratio):
+                config = self._config({"id": "image", "model": model, "default_size": "1024x1024"})
+                session = FakeSession(FakeResponse({"data": [{"url": "https://cdn.example.com/out.png"}]}))
+                manager = ChainManager(config, session)
+
+                await manager.run_chain("text2img", "draw a cat", aspect_ratio=ratio)
+
+                self.assertEqual(len(session.posts), 1)
+                self.assertEqual(session.posts[0]["url"], "https://api.example.com/v1/images/generations")
+                payload = session.posts[0]["json"]
+                self.assertEqual(payload["model"], model)
+                self.assertEqual(payload["size"], expected_size)
+                self.assertNotIn("aspect_ratio", payload)
+
+    async def test_chat_request_keeps_aspect_ratio_and_existing_default_size_behavior(self):
+        for model in ("gemini-3.1-flash-image", "midjourney", "gpt-image-2"):
+            for default_size in ("", "1024x1024"):
+                with self.subTest(model=model, default_size=default_size):
+                    config = self._config({
+                        "id": "chat", "api_type": "openai_chat",
+                        "model": model, "default_size": default_size,
+                    })
+                    session = FakeSession(FakeResponse({
+                        "choices": [{"message": {"content": "https://cdn.example.com/chat.png"}}],
+                    }))
+                    manager = ChainManager(config, session)
+
+                    await manager.run_chain("text2img", "draw a cat", aspect_ratio="16:9", quality="high")
+
+                    self.assertEqual(session.posts[0]["url"], "https://api.example.com/v1/chat/completions")
+                    payload = session.posts[0]["json"]
+                    self.assertEqual(payload["aspect_ratio"], "16:9")
+                    self.assertEqual(payload["quality"], "high")
+                    if default_size:
+                        self.assertEqual(payload["size"], default_size)
+                    else:
+                        self.assertNotIn("size", payload)
+
+    def test_other_api_types_keep_original_parameters(self):
+        for api_type in ("gemini_official", "custom_endpoint"):
+            with self.subTest(api_type=api_type):
+                config = self._config({"id": "other", "api_type": api_type})
+                manager = ChainManager(config, session=object())
+                kwargs = {"aspect_ratio": "16:9", "quality": "high"}
+
+                self.assertEqual(manager._apply_provider_defaults(config.providers[0], kwargs), kwargs)
+
+    async def test_unknown_model_or_ratio_keeps_node_default_size_behavior(self):
+        for model, ratio in (("custom-model", "16:9"), ("gpt-image-1", "5:4"), ("gpt-image-2", "5:4")):
+            for default_size in ("", "1024x1024"):
+                with self.subTest(model=model, ratio=ratio, default_size=default_size):
+                    config = self._config({"id": "image", "model": model, "default_size": default_size})
+                    session = FakeSession(FakeResponse({"data": [{"url": "https://cdn.example.com/out.png"}]}))
+
+                    await ChainManager(config, session).run_chain("text2img", "draw a cat", aspect_ratio=ratio)
+
+                    payload = session.posts[0]["json"]
+                    self.assertEqual(payload["aspect_ratio"], ratio)
+                    if default_size:
+                        self.assertEqual(payload["size"], default_size)
+                    else:
+                        self.assertNotIn("size", payload)
+
+    def test_explicit_size_or_resolution_takes_priority_without_mutating_kwargs(self):
+        config = self._config({"id": "image", "model": "gpt-image-1", "default_size": "1024x1024"})
+        manager = ChainManager(config, session=object())
+        for explicit in ({"size": "1536x1024"}, {"size": "auto"}, {"resolution": "2K"}):
+            with self.subTest(explicit=explicit):
+                kwargs = {"aspect_ratio": "16:9", **explicit}
+                original = dict(kwargs)
+
+                result = manager._apply_provider_defaults(config.providers[0], kwargs)
+
+                self.assertEqual(result, original)
+                self.assertEqual(kwargs, original)
+                self.assertIsNot(result, kwargs)
+
+    def test_conversion_does_not_mutate_callers_kwargs(self):
+        config = self._config({"id": "image"})
+        manager = ChainManager(config, session=object())
+        kwargs = {"aspect_ratio": "16:9", "quality": "high"}
+
+        result = manager._apply_provider_defaults(config.providers[0], kwargs)
+
+        self.assertEqual(result, {"size": "1536x864", "quality": "high"})
+        self.assertEqual(kwargs, {"aspect_ratio": "16:9", "quality": "high"})
+
+    async def test_conversion_uses_node_model_when_request_model_is_filtered(self):
+        config = self._config({"id": "image", "model": "gpt-image-1"})
+        session = FakeSession(FakeResponse({"data": [{"url": "https://cdn.example.com/out.png"}]}))
+
+        await ChainManager(config, session).run_chain(
+            "text2img", "draw a cat", aspect_ratio="16:9", model="gpt-image-2",
+        )
+
+        self.assertEqual(session.posts[0]["json"]["model"], "gpt-image-1")
+        self.assertEqual(session.posts[0]["json"]["size"], "1536x1024")
+
+    async def test_edit_request_uses_model_supported_size(self):
+        config = self._config({"id": "image", "model": "gpt-image-1"})
+        session = FakeSession(FakeResponse({"data": [{"url": "https://cdn.example.com/out.png"}]}))
+
+        await ChainManager(config, session).run_chain(
+            "text2img", "edit a cat", aspect_ratio="16:9",
+            user_refs=["data:image/png;base64," + _long_b64()],
+        )
+
+        request = session.posts[0]
+        self.assertEqual(request["url"], "https://api.example.com/v1/images/edits")
+        fields = {field[0]["name"]: field[2] for field in request["data"]._fields}
+        self.assertEqual(fields["size"], "1536x1024")
+        self.assertNotIn("aspect_ratio", fields)
+
+    async def test_fallback_recalculates_size_for_each_node(self):
+        config = self._config(
+            {"id": "primary", "model": "gpt-image-2"},
+            {"id": "backup", "model": "gpt-image-1"},
+        )
+
+        class FailFirstSession(FakeSession):
+            def post(self, url, **kwargs):
+                if self.posts:
+                    self.response = FakeResponse({"data": [{"url": "https://cdn.example.com/out.png"}]})
+                return super().post(url, **kwargs)
+
+        session = FailFirstSession(FakeResponse({"error": {"message": "primary failed"}}, status=500))
+        result = await ChainManager(config, session).run_chain_with_metadata(
+            "text2img", "draw a cat", aspect_ratio="16:9",
+        )
+
+        self.assertEqual(result.provider_id, "backup")
+        self.assertEqual([post["json"]["size"] for post in session.posts], ["1536x864", "1536x1024"])
+        self.assertTrue(all("aspect_ratio" not in post["json"] for post in session.posts))
+
+    async def test_fallback_to_chat_keeps_original_aspect_ratio(self):
+        config = self._config(
+            {"id": "primary", "model": "gpt-image-1"},
+            {"id": "backup", "api_type": "openai_chat", "model": "midjourney"},
+        )
+
+        class FailFirstSession(FakeSession):
+            def post(self, url, **kwargs):
+                if self.posts:
+                    self.response = FakeResponse({
+                        "choices": [{"message": {"content": "https://cdn.example.com/chat.png"}}],
+                    })
+                return super().post(url, **kwargs)
+
+        session = FailFirstSession(FakeResponse({"error": {"message": "primary failed"}}, status=500))
+        result = await ChainManager(config, session).run_chain_with_metadata(
+            "text2img", "draw a cat", aspect_ratio="16:9",
+        )
+
+        self.assertEqual(result.provider_id, "backup")
+        self.assertEqual(session.posts[0]["json"]["size"], "1536x1024")
+        self.assertEqual(session.posts[1]["json"]["aspect_ratio"], "16:9")
+        self.assertNotIn("size", session.posts[1]["json"])
+
+
 class ChainManagerMetadataTest(unittest.IsolatedAsyncioTestCase):
     async def test_chain_result_uses_actual_successful_provider_metadata(self):
         config = PluginConfig.from_dict(

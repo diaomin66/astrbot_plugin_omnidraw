@@ -23,6 +23,59 @@ DEFAULT_SELFIE_ERROR_MESSAGE = "💥 自拍生成失败: {error}"
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-image"
 
+# 仅用于已知 OpenAI 图像模型的比例换算；Chat 中转站继续透传 aspect_ratio。
+# 下表自定义尺寸适用于 GPT Image 2 等模型，不适用于固定尺寸模型。
+# https://developers.openai.com/api/reference/resources/images/methods/generate
+ASPECT_RATIO_TO_SIZE = {
+    "1:1": "1024x1024",
+    "4:3": "1536x1152",
+    "3:4": "1152x1536",
+    "3:2": "1536x1024",
+    "2:3": "1024x1536",
+    "16:9": "1536x864",
+    "9:16": "864x1536",
+    "21:9": "1680x720",
+    "9:21": "720x1680",
+}
+
+OPENAI_FIXED_SIZE_IMAGE_MODELS = frozenset({
+    "gpt-image-1",
+    "gpt-image-1-mini",
+    "gpt-image-1.5",
+    "gpt-image-1.5-2025-12-16",
+})
+OPENAI_CUSTOM_SIZE_IMAGE_MODELS = frozenset({
+    "gpt-image-2",
+    "gpt-image-2-2026-04-21",
+    "gpt-image-2.5-sunburst",
+    "gpt-image-2.5-sunburst-2026-09-08",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-flare-2026-09-08",
+})
+
+
+def aspect_ratio_to_size(aspect_ratio: str, model: str) -> str:
+    """按模型能力把已知比例换算成 size，兼容全角冒号和首尾空格。
+
+    固定尺寸模型按横图、竖图、方图选择支持的尺寸；自定义尺寸模型保留比例。
+    未知模型或比例返回空字符串，由调用方保留原参数及节点默认尺寸逻辑。
+    """
+    key = str(aspect_ratio or "").strip().replace("：", ":")
+    size = ASPECT_RATIO_TO_SIZE.get(key, "")
+    if not size:
+        return ""
+
+    model_name = str(model or "").strip().lower()
+    if model_name in OPENAI_CUSTOM_SIZE_IMAGE_MODELS:
+        return size
+    if model_name in OPENAI_FIXED_SIZE_IMAGE_MODELS:
+        width, height = (int(value) for value in key.split(":"))
+        if width == height:
+            return "1024x1024"
+        return "1536x1024" if width > height else "1024x1536"
+    return ""
+
+
 class APIType:
     """接口类型枚举"""
     OPENAI_IMAGE = "openai_image"

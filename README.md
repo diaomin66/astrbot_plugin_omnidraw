@@ -79,6 +79,10 @@ https://github.com/diaomin66/astrbot_plugin_omnidraw/
 
 `custom_endpoint` 只请求你填写的完整路径，不会自动追加 `/v1`、`/images/generations`、`/images/edits` 或 `/chat/completions`。例如要请求硅基流动、豆包或海外中转站的某个固定接口时，应直接填写 `https://api.example.com/v1/images/generations`、`https://api.example.com/v1/chat/completions` 或服务商文档给出的完整 endpoint。Chat Completions 仅适合会返回图片链接的中转站；官方 OpenAI 生图建议使用 Images 或 Responses 路径。
 
+调用时只传 `aspect_ratio`、未指定 `size` 或 `resolution` 时，`openai_image` 会按已知模型的尺寸能力换算：GPT Image 1 / 1 Mini / 1.5 使用方图 `1024x1024`、横图 `1536x1024`、竖图 `1024x1536`，因此 `16:9` 等比例会近似为支持的横图或竖图；GPT Image 2 / 2.5 使用对应比例的自定义尺寸，例如 `16:9` → `1536x864`。以上模型的已知快照也适用。换算成功后会移除 `aspect_ratio`，避免标准图像接口拒绝该参数。模型尺寸规则参考 [OpenAI Images API 文档](https://developers.openai.com/api/reference/resources/images/methods/generate)。
+
+`openai_chat`、`gemini_official`、`custom_endpoint` 保留原有参数处理行为。未知模型或未识别的比例（例如 `5:4`）不自动换算，仍保留原参数并使用节点默认尺寸逻辑；若上游不接受 `aspect_ratio`，请直接指定其支持的 `size`。
+
 然后在“路由 / 链路”里把：
 
 - 文生图链路指向你的画图节点。
