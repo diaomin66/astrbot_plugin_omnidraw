@@ -1600,7 +1600,15 @@ class OmniDrawPlugin(Star):
                 return
 
             if include_at_avatars and allow_at_avatar and (obj_type == "At" or isinstance(obj, At)):
-                avatar_url = self._build_qq_avatar_url(self._extract_at_user_id(obj))
+                _at_uid = self._extract_at_user_id(obj)
+                try:
+                    _self_id = str(event.get_self_id() or "")
+                except Exception:
+                    _self_id = ""
+                # [patched] 跳过 @ 机器人自己，否则唤醒用的 @ 会把 bot 头像当成参考图
+                if _self_id and str(_at_uid) == _self_id:
+                    return
+                avatar_url = self._build_qq_avatar_url(_at_uid)
                 if avatar_url:
                     images.append(avatar_url)
                 return
@@ -2718,13 +2726,21 @@ class OmniDrawPlugin(Star):
         refs: Any = None,
     ) -> Dict[str, Any]:
         async with aiohttp.ClientSession() as session:
-            optimized_actions = await self.prompt_optimizer.optimize(prompt, count, session=session)
-            optimized_actions = self._normalize_plugin_prompts(optimized_actions, prompt, count)
             raw_refs = (
                 self._as_plugin_image_refs(refs)
                 if refs is not None
-                else (self._get_event_images(event) if event is not None else [])
+                else (
+                    self._get_event_images(event, include_at_avatars=True)
+                    if event is not None
+                    else []
+                )
             )
+            # [patched] 文本生图不锁定人物外貌。
+            # 参考图在这里是素材，可能是一只猫、一栋楼、一件衣服，不一定是人物；
+            # 无条件锁定会要求"发色/瞳色/服装/体型与参考图一致"，对非人物主体是错位的。
+            # 需要锁定人物的是 generate_selfie——那条路径的画面里必定是角色本人。
+            optimized_actions = await self.prompt_optimizer.optimize(prompt, count, session=session)
+            optimized_actions = self._normalize_plugin_prompts(optimized_actions, prompt, count)
             safe_refs = await self._process_and_save_images(raw_refs, session=session)
             leased_paths = self._lease_cache_paths(safe_refs)
 
@@ -2767,14 +2783,51 @@ class OmniDrawPlugin(Star):
     ) -> Dict[str, Any]:
         async with aiohttp.ClientSession() as session:
             fallback_action = action or "看着镜头微笑"
-            optimized_actions = await self.prompt_optimizer.optimize(fallback_action, count, session=session)
-            optimized_actions = self._normalize_plugin_prompts(optimized_actions, fallback_action, count)
             raw_refs = (
                 self._as_plugin_image_refs(refs)
                 if refs is not None
-                else (self._get_event_images(event) if event is not None else [])
+                else (
+                    self._get_event_images(event, include_at_avatars=True)
+                    if event is not None
+                    else []
+                )
             )
-            target_refs = raw_refs if raw_refs else self.plugin_config.persona_ref_images
+            # [patched] 人设参考图与本次消息里的参考图合并，而不是互相替换
+            _persona_refs = list(self.plugin_config.persona_ref_images or [])
+            _extra_refs = list(raw_refs or [])
+            # 人设图在前、本次消息的图在后。两条来源都要一起截断：
+            # 只截合并分支的话，人设图本身超过上限时仍会在
+            # _process_and_save_images 里直接抛 ValueError，整次生图失败。
+            target_refs = (_persona_refs + _extra_refs)[:MAX_REFERENCE_IMAGES_PER_REQUEST]
+            # [patched] 有参考图时告知副脑，避免它另编人物长相
+            # [patched] 按"谁在持机"决定构图自由度：
+            #   明确让别人/他物持机 → 第三人称视角，放开全身；
+            #   其余（含"和朋友一起自拍"这类同框但自己举机）→ 自拍视角，受自拍物理限制。
+            _external_camera_hints = (
+                "帮我拍", "帮忙拍", "帮拍", "帮我照", "帮忙照",
+                "让他拍", "让她拍", "让人拍", "让别人拍", "让人帮", "找人拍",
+                "请人拍", "请他拍", "请她拍",
+                "路人帮", "路人拍",
+                "朋友帮", "朋友给", "朋友拍", "同学帮", "同学给", "同学拍",
+                "同伴帮", "同伴给", "同伴拍", "同事帮", "同事给", "同事拍",
+                "家人帮", "家人给", "家人拍",
+                "摄影师", "三脚架", "定时拍", "支架拍", "自拍杆架",
+            )
+            # 这里只做正向的"持机动作"匹配，不解析否定句。
+            # 例如"不要让朋友帮我拍"仍会命中"朋友帮"。中文否定叠加嵌套从句时
+            # 关键词无法正确切分，而误判的下场只是构图多了点自由度，不值得引入规则。
+            # 只收"持机动作"，不收"同框的人"（朋友/同伴/一起）——
+            # 否则"和朋友一起自拍"会被判成别人持机，反而放开成第三人视角。
+            _act_text = fallback_action or ""
+            # 只要有"别人/他物持机"的信号，就放开全身构图；否则一律按自拍处理。
+            _has_external_camera = any(h in _act_text for h in _external_camera_hints)
+            _is_self_shot = not _has_external_camera
+            optimized_actions = await self.prompt_optimizer.optimize(
+                fallback_action, count, session=session,
+                has_reference=bool(target_refs), selfie=_is_self_shot,
+                external_camera=_has_external_camera,
+            )
+            optimized_actions = self._normalize_plugin_prompts(optimized_actions, fallback_action, count)
             safe_refs = await self._process_and_save_images(target_refs, session=session)
             leased_paths = self._lease_cache_paths(safe_refs)
             extra_param_kwargs = self._parse_extra_params(extra_params)
@@ -2784,11 +2837,22 @@ class OmniDrawPlugin(Star):
                 chain_manager = ChainManager(self.plugin_config, session)
                 prompts = []
                 tasks = []
+                # safe_refs 是处理后的绝对路径。build_persona_prompt 会另外塞一个
+                # persona_ref（只带人设首图），而 target_refs 的第一段本来就是人设图，
+                # 首图已经在 user_refs 里了，留着 persona_ref 就是同一张图传两次。
+                # 这里按规范化后的路径确认它确实存在才删，处理失败的极端情况仍保留兜底。
+                _safe_ref_set = {os.path.abspath(str(ref)) for ref in safe_refs}
                 for optimized_action in optimized_actions:
                     final_prompt, kwargs = self.persona_manager.build_persona_prompt(optimized_action)
                     if safe_refs:
                         kwargs["user_refs"] = safe_refs
-                        if not raw_refs:
+                        _persona_first = kwargs.get("persona_ref")
+                        if (
+                            _persona_first
+                            # URL 形态不参与本地路径比较（provider 侧自行处理）
+                            and not str(_persona_first).startswith(("http://", "https://"))
+                            and os.path.abspath(str(_persona_first)) in _safe_ref_set
+                        ):
                             kwargs.pop("persona_ref", None)
                     if aspect_ratio:
                         kwargs["aspect_ratio"] = aspect_ratio

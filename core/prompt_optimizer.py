@@ -6,7 +6,22 @@ from typing import Optional
 from astrbot.api import logger
 from ..models import PluginConfig
 from ..constants import APIType
-from ..providers.base import build_chat_completions_endpoint, next_api_key, read_response_text_limited
+try:
+    from ..providers.base import (
+        build_chat_completions_endpoint,
+        next_api_key,
+        read_response_text_limited,
+    )
+except ImportError:
+    # [patched] 兼容旧版 providers/base.py：旧版本没有 read_response_text_limited
+    from ..providers.base import build_chat_completions_endpoint, next_api_key
+
+    async def read_response_text_limited(response, max_bytes: int = 256 * 1024) -> str:
+        text = await response.text()
+        if max_bytes and len(text.encode("utf-8", errors="ignore")) > max_bytes:
+            raise ValueError(f"响应超过大小限制 {max_bytes // 1024}KB")
+        return text
+
 
 MAX_OPTIMIZER_RESPONSE_BYTES = 256 * 1024
 
@@ -15,7 +30,7 @@ class PromptOptimizer:
     def __init__(self, config: PluginConfig):
         self.config = config
 
-    async def optimize(self, raw_action: str, count: int = 1, session: Optional[aiohttp.ClientSession] = None) -> list:
+    async def optimize(self, raw_action: str, count: int = 1, session: Optional[aiohttp.ClientSession] = None, has_reference: bool = False, selfie: bool = False, external_camera: bool = False) -> list:
         if not getattr(self.config, "enable_optimizer", True):
             return [raw_action] * count
 
@@ -119,6 +134,52 @@ class PromptOptimizer:
         else:
             style_data = STYLE_PRESETS.get(style_choice, STYLE_PRESETS["手机日常原生感"])
 
+        # [patched] 有参考图时锁定人物外观，禁止副脑另编长相
+        _ref_rule = ""
+        if has_reference:
+            style_data = dict(style_data)
+            style_data["subject"] = (
+                "the character must match the attached reference image exactly: preserve the same hair color, "
+                "hairstyle, eye color, outfit and body proportions as the reference, "
+                "do not redesign or substitute a different-looking character"
+            )
+            _ref_rule = (
+                "\n7. REFERENCE LOCK: Character reference images are attached to this request. "
+                "In subject_appearance, state that the character must match the attached reference exactly. "
+                "Do NOT invent hair color, eye color, hairstyle, outfit or body type that contradicts the reference. "
+                "If the user's action involves another person and extra reference images are attached, "
+                "that person must also match their own reference image. "
+                "Do NOT assign gender, age, hair color, hairstyle or clothing to any additional person; "
+                "refer to them only as 'the other person shown in the reference images'. "
+                "If the user's action already named a gender or look for that person, ignore it "
+                "and follow the reference image instead."
+            )
+
+        # [patched] 自拍模式：自拍镜头的物理限制，禁止全身/第三人视角
+        if selfie:
+            _ref_rule += (
+                "\n8. SELFIE MODE: this image is a front-facing phone selfie taken by the character herself, "
+                "camera held at arm's length. Frame at most from head to thighs — a selfie camera cannot capture "
+                "a full body from head to shoes, so never write a full-body framing. "
+                "Do NOT show the phone from behind or from a third-person angle, "
+                "and never imply that someone else is holding the camera. "
+                "If the user asked for a full-body shot, keep it a normal selfie framing instead "
+                "and do not invent a photographer."
+            )
+        # [patched] 明确由别人/三脚架持机：允许全身，且不要画成自己举手机
+        elif external_camera:
+            _ref_rule += (
+                "\n8. EXTERNAL CAMERA: in this image the camera is not held by the character. "
+                "It was handed to another person or mounted on a tripod, so a full-body framing "
+                "(head to shoes) is allowed and encouraged when the user asks for it. "
+                "Compose from a third-person / observer viewpoint at normal eye level or slightly below. "
+                "The character must NOT be holding a phone up toward herself, and must not appear "
+                "to be taking her own picture. "
+                "Do NOT put the photographer or the phone into the frame, and do not describe their hands "
+                "or arms entering the shot. "
+                "Look toward the camera lens naturally, posing for whoever is holding it."
+            )
+
         base_json_struct = f"""{{
   "subject_appearance": "{style_data['subject']}",
   "clothing_and_accessories": "{style_data['clothing']}",
@@ -138,7 +199,7 @@ CRITICAL RULES:
 3. ALL output values MUST be written in fluent natural English. Translate any Chinese, Japanese, Korean, or mixed-language user input into English. Do not copy non-English text into the JSON.
 4. ABSOLUTELY NO collages, grids, or multiple views. Describe exactly ONE single frozen moment.
 5. STYLE ADHERENCE: Strictly follow the aesthetics, materials, lighting, anatomy, skin, and realism guardrails described in the output format.
-6. Prefer concrete visual nouns and camera-language over abstract adjectives. Keep the prompt useful for an image model.
+6. Prefer concrete visual nouns and camera-language over abstract adjectives. Keep the prompt useful for an image model.{_ref_rule}
 OUTPUT FORMAT (Use these exact keys):
 {base_json_struct}"""
         else:
@@ -150,7 +211,7 @@ CRITICAL RULES:
 3. ALL output values MUST be written in fluent natural English. Translate any Chinese, Japanese, Korean, or mixed-language user input into English. Do not copy non-English text into the JSON.
 4. ANTI-COLLAGE RULE: Each JSON object represents ONE SINGLE IMAGE. Pick exactly ONE specific pose and ONE camera angle per object.
 5. STYLE ADHERENCE: Strictly follow the aesthetics, materials, lighting, anatomy, skin, and realism guardrails described in the output format.
-6. Each variation must be visually distinct while remaining natural and physically plausible.
+6. Each variation must be visually distinct while remaining natural and physically plausible.{_ref_rule}
 
 OUTPUT FORMAT:
 {{
