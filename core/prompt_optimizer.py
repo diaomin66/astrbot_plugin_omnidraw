@@ -2,43 +2,38 @@
 import json
 import re
 import aiohttp
-from typing import Optional
+import asyncio
+from typing import Any, Optional
 from astrbot.api import logger
 from ..models import PluginConfig
-from ..constants import APIType
-from ..providers.base import build_chat_completions_endpoint, next_api_key, read_response_text_limited
-
-MAX_OPTIMIZER_RESPONSE_BYTES = 256 * 1024
-
+from ..providers.base import build_chat_completions_endpoint, next_api_key
 
 class PromptOptimizer:
-    def __init__(self, config: PluginConfig):
+    def __init__(self, config: PluginConfig, context: Optional[Any] = None):
         self.config = config
+        self.context = context
 
     async def optimize(self, raw_action: str, count: int = 1, session: Optional[aiohttp.ClientSession] = None) -> list:
         if not getattr(self.config, "enable_optimizer", True):
             return [raw_action] * count
 
-        if not raw_action or raw_action.strip() == "":
-            return [raw_action] * count
+        if not raw_action or raw_action.strip() == "": return [raw_action] * count
 
-        chain = self.config.chains.get("optimizer", [])
-        provider = self.config.get_provider(chain[0]) if chain else (self.config.providers[0] if self.config.providers else None)
-        if not provider or not provider.base_url:
-            return [raw_action] * count
-        if provider.api_type == APIType.GEMINI_OFFICIAL:
-            logger.warning("⚠️ [副脑] Gemini 官方节点不兼容 OpenAI Chat 优化协议，已跳过副脑优化。")
-            return [raw_action] * count
+        use_astrbot_provider = getattr(self.config, "optimizer_use_astrbot_provider", False)
+        provider = None
+        endpoint = ""
+        headers = {}
+        if not use_astrbot_provider:
+            chain = self.config.chains.get("optimizer", [])
+            provider = self.config.get_provider(chain[0]) if chain else (self.config.providers[0] if self.config.providers else None)
+            if not provider or not provider.base_url:
+                return [raw_action] * count
 
-        endpoint = build_chat_completions_endpoint(provider.base_url)
-        api_key = next_api_key(
-            provider.id,
-            provider.api_keys,
-            scope=f"optimizer:{provider.api_type}:{provider.base_url}",
-        )
-        if not endpoint or not api_key:
-            return [raw_action] * count
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            endpoint = build_chat_completions_endpoint(provider.base_url)
+            api_key = next_api_key(provider.id, provider.api_keys)
+            if not endpoint or not api_key:
+                return [raw_action] * count
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
         # ==========================================
         # 🚀 动态风格插槽系统 (Dynamic Style Engine)
@@ -170,83 +165,63 @@ OUTPUT FORMAT:
 
         session_obj = session
         close_session = False
-        if session_obj is None:
+        if not use_astrbot_provider and session_obj is None:
             session_obj = aiohttp.ClientSession()
             close_session = True
 
         try:
             try:
                 timeout_val = self.config.optimizer_timeout * (1.5 if count > 1 else 1.0)
-                logger.info(f"🧠 [副脑] 正在以【{style_choice}】风格重构提示词 (模型: {self.config.optimizer_model})")
-
-                async with session_obj.post(endpoint, headers=headers, json=payload, timeout=timeout_val) as resp:
-                    resp.raise_for_status()
-                    response_text = await read_response_text_limited(
-                        resp,
-                        max_bytes=MAX_OPTIMIZER_RESPONSE_BYTES,
+                if use_astrbot_provider:
+                    if self.context is None:
+                        raise RuntimeError("未取得 AstrBot Context，无法调用当前文本模型")
+                    active_provider = self.context.get_using_provider()
+                    if active_provider is None:
+                        raise RuntimeError("AstrBot 当前未配置可用的文本模型")
+                    provider_id = active_provider.meta().id
+                    logger.info(f"🧠 [副脑] 正在以【{style_choice}】风格调用 AstrBot 文本模型 ({provider_id})")
+                    llm_response = await asyncio.wait_for(
+                        self.context.llm_generate(
+                            chat_provider_id=provider_id,
+                            prompt=raw_action,
+                            system_prompt=sys_prompt,
+                            max_tokens=payload["max_tokens"],
+                            temperature=payload["temperature"],
+                            response_format=payload["response_format"],
+                        ),
+                        timeout=timeout_val,
                     )
-                    data = json.loads(response_text)
+                    raw_content = str(getattr(llm_response, "completion_text", "") or "").strip()
+                else:
+                    logger.info(f"🧠 [副脑] 正在以【{style_choice}】风格重构提示词 (模型: {self.config.optimizer_model})")
+                    async with session_obj.post(endpoint, headers=headers, json=payload, timeout=timeout_val) as resp:
+                        resp.raise_for_status()
+                        data = await resp.json()
+                    raw_content = (
+                        data["choices"][0]["message"]["content"].strip()
+                        if data.get("choices")
+                        else ""
+                    )
 
-                    if isinstance(data, dict) and "choices" in data and len(data["choices"]) > 0:
-                        raw_content = data["choices"][0]["message"]["content"].strip()
+                if raw_content:
+
+                        start_idx = raw_content.find('{')
+                        end_idx = raw_content.rfind('}')
+                        clean_json_str = raw_content[start_idx:end_idx+1] if (start_idx != -1 and end_idx != -1 and end_idx >= start_idx) else raw_content
+
+                        clean_json_str = clean_json_str.replace('\n', ' ').replace('\r', '')
+                        clean_json_str = re.sub(r',\s*}', '}', clean_json_str)
+                        clean_json_str = re.sub(r',\s*]', ']', clean_json_str)
 
                         items = []
                         try:
-                            clean_json_str = raw_content.strip()
-                            fenced_json = re.fullmatch(
-                                r"```(?:json)?\s*(.*?)\s*```",
-                                clean_json_str,
-                                flags=re.IGNORECASE | re.DOTALL,
-                            )
-                            if fenced_json:
-                                clean_json_str = fenced_json.group(1).strip()
-
-                            try:
-                                prompt_data = json.loads(clean_json_str)
-                            except json.JSONDecodeError as original_error:
-                                prompt_data = None
-                                decoder = json.JSONDecoder()
-                                for match in re.finditer(r"[\[{]", clean_json_str):
-                                    try:
-                                        candidate, _ = decoder.raw_decode(clean_json_str[match.start():])
-                                    except json.JSONDecodeError:
-                                        continue
-                                    if isinstance(candidate, (dict, list)):
-                                        prompt_data = candidate
-                                        break
-
-                                for match in re.finditer(r"[\[{]", clean_json_str):
-                                    if prompt_data is not None:
-                                        break
-                                    opener = match.group(0)
-                                    closer = "]" if opener == "[" else "}"
-                                    end_idx = clean_json_str.rfind(closer)
-                                    if end_idx < match.start():
-                                        continue
-                                    candidate = clean_json_str[match.start():end_idx + 1]
-                                    repaired_candidate = candidate.replace('\n', ' ').replace('\r', '')
-                                    repaired_candidate = re.sub(r',\s*}', '}', repaired_candidate)
-                                    repaired_candidate = re.sub(r',\s*]', ']', repaired_candidate)
-                                    for candidate_text in (candidate, repaired_candidate):
-                                        try:
-                                            prompt_data = json.loads(candidate_text)
-                                            break
-                                        except json.JSONDecodeError:
-                                            continue
-                                    if prompt_data is not None:
-                                        break
-                                if prompt_data is None:
-                                    raise original_error
-
-                            if isinstance(prompt_data, list):
-                                items = prompt_data
-                            elif isinstance(prompt_data, dict):
-                                if count == 1:
-                                    items = [prompt_data]
-                                else:
-                                    items = prompt_data.get("results", [])
+                            prompt_data = json.loads(clean_json_str)
+                            if count == 1:
+                                items = [prompt_data]
                             else:
-                                raise ValueError("副脑返回 JSON 不是对象或数组")
+                                items = prompt_data.get("results", [])
+                                if not items and isinstance(prompt_data, list):
+                                    items = prompt_data
                         except Exception as e:
                             logger.warning(f"⚠️ [副脑] 原生 JSON 解析失败, 启动无敌抢救模式... 错误: {e}")
                             fallback_item = {}
@@ -287,7 +262,7 @@ OUTPUT FORMAT:
                         results = []
                         anti_collage = "single image, one natural coherent frame, no grid, no collage, no split screen, no multiple views"
 
-                        for item in items[:count]:
+                        for item in items:
                             if isinstance(item, dict):
                                 parts = []
                                 for k in ["subject_appearance", "clothing_and_accessories", "pose_and_action", "environment_and_scene", "lighting_and_mood", "technical_specs", "realism_and_quality_guardrails"]:

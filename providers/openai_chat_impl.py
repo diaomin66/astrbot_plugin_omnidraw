@@ -3,8 +3,6 @@ AstrBot 万象画卷插件 v3.1 - OpenAI Chat 兼容实现
 功能：支持高阶多模态参数动态透传 (兼容 Midjourney/Gemini 等走 Chat 通道的代理节点)
 """
 import aiohttp
-import base64
-import json
 from typing import Any
 from astrbot.api import logger
 
@@ -13,7 +11,6 @@ from .base import (
     build_chat_completions_endpoint,
     extract_error_message,
     extract_image_url_from_response,
-    read_response_text_limited,
     summarize_payload_json_for_log,
     summarize_response_text_for_log,
 )
@@ -21,10 +18,9 @@ from .base import (
 class OpenAIChatProvider(BaseProvider):
 
     async def _encode_image_to_base64(self, image_path_or_url: str) -> str:
-        """拦截网络图片下载，对抗防盗链，转化为标准的 Base64 协议"""
+        """拦截网络图片下载（对抗防盗链）并转成 data URL；失败时返回空串，跳过该参考图。"""
         try:
-            image_bytes, mime_type = await self.read_reference_image(image_path_or_url)
-            return f"data:{mime_type};base64," + base64.b64encode(image_bytes).decode("utf-8")
+            return await self.fetch_reference_data_url(image_path_or_url)
         except Exception as e:
             logger.error("读取或下载参考图失败: " + str(e))
             return ""
@@ -35,7 +31,6 @@ class OpenAIChatProvider(BaseProvider):
             raise ValueError("节点未配置 API Key！")
 
         target_refs = self.get_reference_images(**kwargs)
-        loaded_refs = await self.load_reference_images(target_refs)
 
         # ==========================================
         # 🚀 学习 Gitee AI 的标准 Vision 协议构造法
@@ -44,8 +39,10 @@ class OpenAIChatProvider(BaseProvider):
 
         # 1. ⚠️ 关键修正：图片必须在文字之前！
         image_count = 0
-        for image_bytes, mime_type in loaded_refs:
-            b64_image = f"data:{mime_type};base64," + base64.b64encode(image_bytes).decode("utf-8")
+        for ref_image in target_refs:
+            b64_image = await self._encode_image_to_base64(ref_image)
+            if not b64_image:
+                continue
             user_content.append({
                 "type": "image_url",
                 "image_url": {
@@ -78,7 +75,8 @@ class OpenAIChatProvider(BaseProvider):
         }
 
         # 🚀 将高级透传参数暴力注入到 Chat 协议的顶级结构中
-        api_kwargs = self.filter_api_kwargs(kwargs)
+        internal_keys = {"user_refs", "user_ref", "persona_refs", "persona_ref"}
+        api_kwargs = {k: v for k, v in kwargs.items() if k not in internal_keys}
         
         if api_kwargs:
             payload.update(api_kwargs)
@@ -95,18 +93,11 @@ class OpenAIChatProvider(BaseProvider):
         async with self.session.post(url, json=payload, headers=headers, timeout=timeout_obj) as response:
             status = response.status
             if status != 200:
-                error_text = await read_response_text_limited(response)
+                error_text = await response.text()
                 logger.error("💥 Chat/Vision通道 API 返回错误摘要: " + summarize_response_text_for_log(error_text, max_string_length=500))
                 raise RuntimeError("HTTP " + str(status) + ": " + extract_error_message(error_text))
             
-            response_text = await read_response_text_limited(response)
-            try:
-                result = json.loads(response_text)
-            except Exception:
-                raise ValueError(
-                    "Chat接口返回结构异常，响应不是 JSON: "
-                    + summarize_response_text_for_log(response_text, max_string_length=500)
-                )
+            result = await response.json()
             image_url = extract_image_url_from_response(result, self.config.base_url)
             if image_url:
                 return image_url
