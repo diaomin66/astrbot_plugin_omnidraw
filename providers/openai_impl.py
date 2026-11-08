@@ -4,6 +4,8 @@ import json
 from typing import Any
 
 from astrbot.api import logger
+from ..constants import MAX_IMAGE_BYTES
+from ..core.image_options import is_gif_request
 
 from .base import (
     BaseProvider,
@@ -14,6 +16,7 @@ from .base import (
     read_response_text_limited,
     summarize_payload_json_for_log,
     summarize_response_text_for_log,
+    validate_gif_result,
 )
 
 class OpenAIProvider(BaseProvider):
@@ -28,9 +31,10 @@ class OpenAIProvider(BaseProvider):
         logger.info(f"📝 [标准通道] 最终发送给 API 的核心提示词:\n{prompt}")
 
         api_kwargs = self.filter_api_kwargs(kwargs)
+        gif_requested = is_gif_request(api_kwargs)
 
         if ref_images:
-            url = build_image_edits_endpoint(base_url)
+            url = build_image_edits_endpoint(base_url, force_edits=gif_requested)
             logger.info(f"✅ 检测到 {len(ref_images)} 张参考图，正切换至标准改图通道: {url}")
             max_images = 3 if url.lower().split("?", 1)[0].endswith("/images/generations") else 14
             loaded_refs = await self.load_reference_images(ref_images, max_images=max_images)
@@ -50,7 +54,7 @@ class OpenAIProvider(BaseProvider):
                 headers = {"Content-Type": "application/json", "Authorization": "Bearer " + current_key}
                 timeout_obj = aiohttp.ClientTimeout(total=self.config.timeout)
                 async with self.session.post(url, json=payload, headers=headers, timeout=timeout_obj) as response:
-                    return await self._parse_response(response, base_url)
+                    return await self._parse_response(response, base_url, gif_requested=gif_requested)
 
             data = aiohttp.FormData()
             for idx, (image_bytes, mime_type) in enumerate(loaded_refs, start=1):
@@ -72,7 +76,7 @@ class OpenAIProvider(BaseProvider):
             headers = {"Authorization": "Bearer " + current_key}
             timeout_obj = aiohttp.ClientTimeout(total=self.config.timeout)
             async with self.session.post(url, data=data, headers=headers, timeout=timeout_obj) as response:
-                return await self._parse_response(response, base_url)
+                return await self._parse_response(response, base_url, gif_requested=gif_requested)
 
         else:
             url = build_image_generations_endpoint(base_url)
@@ -94,9 +98,11 @@ class OpenAIProvider(BaseProvider):
 
             timeout_obj = aiohttp.ClientTimeout(total=self.config.timeout)
             async with self.session.post(url, json=payload, headers=headers, timeout=timeout_obj) as response:
-                return await self._parse_response(response, base_url)
+                return await self._parse_response(response, base_url, gif_requested=gif_requested)
 
-    async def _parse_response(self, response: aiohttp.ClientResponse, base_url: str) -> str:
+    async def _parse_response(
+        self, response: aiohttp.ClientResponse, base_url: str, *, gif_requested: bool = False,
+    ) -> str:
         status = response.status
         response_text = await read_response_text_limited(response)
         if status != 200:
@@ -109,9 +115,11 @@ class OpenAIProvider(BaseProvider):
             result = json.loads(response_text)
         except Exception:
             raise ValueError("API 返回结构异常，响应不是 JSON: " + summarize_response_text_for_log(response_text))
-        image_url = extract_image_url_from_response(result, base_url)
+        image_url = extract_image_url_from_response(
+            result, base_url, max_inline_bytes=MAX_IMAGE_BYTES if gif_requested else None,
+        )
         if image_url:
-            return image_url
+            return validate_gif_result(image_url) if gif_requested else image_url
 
         raise ValueError(
             "API 返回结构异常，未找到图片数据: "

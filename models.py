@@ -26,7 +26,7 @@ from .utils import save_image_bytes, split_data_url
 
 PLUGIN_NAME = "astrbot_plugin_omnidraw"
 PLUGIN_AUTHOR = "雪碧bir"
-PLUGIN_VERSION = "3.3.21"
+PLUGIN_VERSION = "3.4.1"
 DEFAULT_CACHE_CLEANUP_INTERVAL_HOURS = 24
 DEFAULT_MAX_CACHE_SIZE_MB = 512
 

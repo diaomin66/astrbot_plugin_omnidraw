@@ -43,7 +43,7 @@ ALLOWED_ASPECT_RATIOS = (
 
 
 class GeminiOfficialProvider(BaseProvider):
-    """Call Google's native Gemini generateContent endpoint."""
+    """Call Gemini's native protocol at the configured proxy or Google endpoint."""
 
     async def _get_image_bytes(self, image_path_or_url: str) -> bytes:
         image_bytes, _ = await self.read_reference_image(image_path_or_url)
@@ -67,15 +67,22 @@ class GeminiOfficialProvider(BaseProvider):
     def _endpoint(self, model: str) -> str:
         base_url = normalize_base_url(self.config.base_url) or DEFAULT_GEMINI_BASE_URL
         parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Gemini 接口地址必须为完整的 HTTP(S) URL；只有留空时才使用官方地址。")
         path = parsed.path.rstrip("/")
         if path.lower().endswith(":generatecontent"):
             return base_url
-        if "/models/" in path.lower():
+        model_segment = quote(model, safe="-._~")
+        if path.lower().endswith("/models"):
+            path += f"/{model_segment}:generateContent"
+        elif re.search(r"/models/[^/]+$", path, re.IGNORECASE):
+            # A model explicitly pinned in the URL takes precedence over the node model.
             path += ":generateContent"
         else:
-            if path.lower().endswith("/models"):
-                path = path[: -len("/models")]
-            path += f"/models/{quote(model, safe='-._~')}:generateContent"
+            # Add a version only for a bare origin; explicit gateway paths stay intact.
+            if not path:
+                path = urlparse(DEFAULT_GEMINI_BASE_URL).path.rstrip("/")
+            path += f"/models/{model_segment}:generateContent"
         return urlunparse(parsed._replace(path=path))
 
     def _pop_any(self, params: Dict[str, Any], *names: str) -> Any:
@@ -175,21 +182,21 @@ class GeminiOfficialProvider(BaseProvider):
 
     async def _post_json(self, endpoint: str, headers: Dict[str, str], payload: Dict[str, Any]) -> str:
         timeout_obj = aiohttp.ClientTimeout(total=self.config.timeout)
-        logger.info(f"📤 [Gemini官方通道] 请求路径: {summarize_url_for_log(endpoint)}")
-        logger.info(f"📤 [Gemini官方通道] 请求体摘要: {summarize_payload_json_for_log(payload)}")
+        logger.info(f"📤 [Gemini原生通道] 请求路径: {summarize_url_for_log(endpoint)}")
+        logger.info(f"📤 [Gemini原生通道] 请求体摘要: {summarize_payload_json_for_log(payload)}")
         async with self.session.post(endpoint, json=payload, headers=headers, timeout=timeout_obj) as response:
             text = await read_response_text_limited(response)
             if response.status >= 400:
-                logger.error("💥 Gemini官方通道 API 返回错误摘要: " + summarize_response_text_for_log(text, max_string_length=500))
+                logger.error("💥 Gemini原生通道 API 返回错误摘要: " + summarize_response_text_for_log(text, max_string_length=500))
                 raise RuntimeError(f"HTTP {response.status}: {extract_error_message(text)}")
             try:
                 result = json.loads(text)
             except Exception:
-                raise ValueError("Gemini 官方接口返回结构异常，响应不是 JSON: " + summarize_response_text_for_log(text))
+                raise ValueError("Gemini 原生接口返回结构异常，响应不是 JSON: " + summarize_response_text_for_log(text))
             image_url = extract_image_url_from_response(result, endpoint)
             if image_url:
                 return image_url
-            raise ValueError("Gemini 官方接口未返回图片数据: " + self._failure_summary(result))
+            raise ValueError("Gemini 原生接口未返回图片数据: " + self._failure_summary(result))
 
     async def generate_image(self, prompt: str, **kwargs: Any) -> str:
         current_key = self.get_current_key()
@@ -198,12 +205,12 @@ class GeminiOfficialProvider(BaseProvider):
 
         ref_images = self.get_reference_images(**kwargs)
         api_kwargs = self.filter_api_kwargs(kwargs)
-        loaded_refs = await self.load_reference_images(ref_images, max_images=MAX_REFERENCE_IMAGES)
         model = self._request_model(api_kwargs)
         if not model:
-            raise ValueError("Gemini 官方节点未配置模型名！")
+            raise ValueError("Gemini 节点未配置模型名！")
 
         endpoint = self._endpoint(model)
+        loaded_refs = await self.load_reference_images(ref_images, max_images=MAX_REFERENCE_IMAGES)
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": current_key,
@@ -228,7 +235,7 @@ class GeminiOfficialProvider(BaseProvider):
 
         if api_kwargs:
             ignored = ", ".join(sorted(str(key) for key in api_kwargs))
-            logger.info(f"ℹ️ [Gemini官方通道] 已忽略非 Gemini 官方参数: {ignored}")
+            logger.info(f"ℹ️ [Gemini原生通道] 已忽略非 Gemini 原生参数: {ignored}")
 
-        logger.info(f"📝 [Gemini官方通道] 最终发送给 API 的核心提示词:\n{prompt}")
+        logger.info(f"📝 [Gemini原生通道] 最终发送给 API 的核心提示词:\n{prompt}")
         return await self._post_json(endpoint, headers, payload)

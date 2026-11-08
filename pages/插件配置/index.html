@@ -3,74 +3,71 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#C1E6FF" />
-    <title>OmniDraw Station</title>
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="color-scheme" content="light" />
+    <title>万象画卷 · 插件配置</title>
     <link rel="icon" href="./logo.png" />
-    <link rel="stylesheet" href="./style.css?v=3.4.0" />
+    <link rel="stylesheet" href="./assets/ui.css?v=3.4.1-scoped-ui" />
 </head>
-<body>
+<body class="bg-background text-gray-700 font-sans">
     <div class="app-shell">
         <aside class="sidebar">
             <div class="brand-block">
-                <div class="brand-mark" aria-hidden="true">
-                    <img src="./logo.png" alt="" />
-                </div>
+                <div class="brand-mark" aria-hidden="true"></div>
                 <div>
                     <h1>万象画卷</h1>
-                    <p>OmniDraw Station</p>
+                    <p>OmniDraw / 设置</p>
                 </div>
+                <button class="btn-secondary mobile-nav-toggle" data-action="open-navigation" type="button" aria-label="打开配置导航">导航</button>
             </div>
-            <div class="sidebar-status"><span></span>SYSTEM_ONLINE</div>
-
             <nav class="nav-menu" aria-label="配置导航">
-                <div class="nav-label">GATEWAY</div>
-                <button class="nav-item active" data-target="tab-basic" type="button">
-                    <span class="nav-icon">⚙</span><span>全局</span>
+                <div class="nav-label">管理</div>
+                <button class="nav-item active" data-target="tab-basic" aria-current="page" type="button">
+                    <span class="nav-icon" aria-hidden="true"></span><span>全局配置</span>
                 </button>
                 <button class="nav-item" data-target="tab-usage" type="button">
-                    <span class="nav-icon">#</span><span>用量</span>
+                    <span class="nav-icon" aria-hidden="true"></span><span>用量与缓存</span>
                 </button>
-                <div class="nav-label">CREATIVE</div>
+                <div class="nav-label">创作</div>
                 <button class="nav-item" data-target="tab-persona" type="button">
-                    <span class="nav-icon">◎</span><span>人设</span>
+                    <span class="nav-icon" aria-hidden="true"></span><span>人设档案</span>
                 </button>
                 <button class="nav-item" data-target="tab-hub" type="button">
-                    <span class="nav-icon">↔</span><span>调度</span>
+                    <span class="nav-icon" aria-hidden="true"></span><span>生成调度</span>
                 </button>
-                <div class="nav-label">INTELLIGENCE</div>
                 <button class="nav-item" data-target="tab-optimizer" type="button">
-                    <span class="nav-icon">✦</span><span>副脑</span>
+                    <span class="nav-icon" aria-hidden="true"></span><span>提示词优化</span>
                 </button>
                 <button class="nav-item" data-target="tab-presets" type="button">
-                    <span class="nav-icon">⌘</span><span>宏</span>
+                    <span class="nav-icon" aria-hidden="true"></span><span>快捷指令</span>
                 </button>
-                <div class="nav-label">INFRASTRUCTURE</div>
+                <div class="nav-label">连接</div>
                 <button class="nav-item" data-target="tab-nodes" type="button">
-                    <span class="nav-icon">▣</span><span>节点</span>
+                    <span class="nav-icon" aria-hidden="true"></span><span>接口节点</span>
                 </button>
             </nav>
 
             <div class="sidebar-metrics">
                 <div><span id="metric-image-nodes">0</span><small>图像节点</small></div>
                 <div><span id="metric-video-nodes">0</span><small>视频节点</small></div>
-                <div><span id="metric-presets">0</span><small>宏指令</small></div>
+                <div><span id="metric-presets">0</span><small>快捷指令</small></div>
                 <div><span id="metric-today-images">0</span><small>今日生图</small></div>
             </div>
 
             <div class="save-panel">
-                <div class="save-state" id="save-state">配置已同步</div>
-                <button data-action="save-config" class="btn-primary" type="button">保存更改</button>
+                <div class="save-state" id="save-state" role="status">正在读取配置</div>
+                <button data-action="save-config" class="btn-primary" type="button" title="保存更改 (Ctrl / Command + S)" disabled>保存更改</button>
             </div>
         </aside>
 
         <main class="content" aria-busy="true">
             <header class="topbar">
                 <div>
-                    <span class="eyebrow">PLUGIN SETTINGS</span>
+                    <span class="eyebrow">万象画卷 / 插件配置</span>
                     <h2 id="active-title">全局配置</h2>
-                    <p class="topbar-caption">统一管理绘图、自拍、视频与副脑调度</p>
+                    <p class="topbar-caption">管理使用权限与消息显示，现有配置无需迁移。</p>
                 </div>
-                <div class="status-pill" id="page-status" aria-live="polite"><span></span><strong>LOADING</strong></div>
+                <div class="status-pill" id="page-status" aria-live="polite"><span></span><strong>读取中</strong></div>
             </header>
 
             <section id="tab-basic" class="tab-pane active" data-title="全局配置">
@@ -102,6 +99,7 @@
                         </div>
                     </article>
 
+                    <div class="basic-result-settings">
                     <article class="card">
                         <div class="setting-row">
                             <div>
@@ -118,7 +116,7 @@
                         <div class="card-header">
                             <div>
                                 <h3>成功结果信息</h3>
-                                <p>控制 /画、宏指令、/自拍 和 /视频 指令成功后是否附带生成耗时与请求模型。</p>
+                                <p>控制 /画、/gif、宏指令、/自拍 和 /视频 成功后是否附带生成耗时与请求模型。</p>
                             </div>
                         </div>
                         <div class="setting-row">
@@ -141,6 +139,7 @@
                         </div>
                     </article>
 
+                    </div>
                     <article class="card">
                         <div class="card-header">
                             <div>
@@ -184,7 +183,7 @@
                         </div>
                         <div class="form-group">
                             <label for="usage_daily_limit">每人每日上限</label>
-                            <input type="number" id="usage_daily_limit" class="input-modern" min="1" />
+                            <input type="number" id="usage_daily_limit" class="input-modern" min="0" />
                         </div>
                     </article>
 
@@ -302,11 +301,11 @@
                             <button class="btn-glass-secondary" data-action="add-persona" type="button">新增人设</button>
                         </div>
                         <div class="form-group">
-                            <label for="persona_name">实体代号</label>
+                            <label for="persona_name">人设名称</label>
                             <input type="text" id="persona_name" class="input-modern" data-sync="persona-name" />
                         </div>
                         <div class="form-group">
-                            <label for="persona_prompt">底层特征序列 (Base Prompt)</label>
+                            <label for="persona_prompt">基础描述 (Base Prompt)</label>
                             <textarea id="persona_prompt" rows="7" class="input-modern" data-sync="persona-prompt"></textarea>
                         </div>
                     </article>
@@ -314,8 +313,8 @@
                     <article class="card">
                         <div class="card-header">
                             <div>
-                                <h3>参考图矩阵</h3>
-                                <p>支持多张形象参考图。最好1-3张，建议控制在5张以内。</p>
+                                <h3>形象参考图</h3>
+                                <p>支持多张参考图，建议使用 1 至 3 张，每张不超过 20 MB。</p>
                             </div>
                         </div>
                         <div class="multi-upload-container" id="persona-upload-container">
@@ -336,6 +335,10 @@
                             <h3>链路路由</h3>
                             <p>把不同任务指向对应节点。</p>
                         </div>
+                    </div>
+                    <div class="section-note">
+                        <strong>GIF 复用图像生成链路</strong>
+                        <p>将支持 GIF 的 GPT Image 2.6 标准生图节点加入图像链路，使用 <code>/gif 提示词</code> 即可。静态图、自拍与视频的原有路由不变。</p>
                     </div>
                     <div class="route-stack">
                         <div class="route-row">
@@ -384,7 +387,7 @@
                 </article>
             </section>
 
-            <section id="tab-optimizer" class="tab-pane" data-title="副脑引擎">
+            <section id="tab-optimizer" class="tab-pane" data-title="提示词优化">
                 <article class="card highlight-card wide-card">
                     <div class="card-header">
                         <div>
@@ -396,8 +399,17 @@
                         </label>
                     </div>
                     <div class="form-grid">
+                        <div class="setting-row full-width">
+                            <div>
+                                <h3>宿主模型选项（兼容保留）</h3>
+                                <p>保留历史 use_astrbot_provider 设置；当前提示词优化仍使用下方节点链路。</p>
+                            </div>
+                            <label class="switch-wrapper" for="opt_astrbot">
+                                <input type="checkbox" id="opt_astrbot" class="ios-switch" aria-label="保留宿主模型选项" />
+                            </label>
+                        </div>
                         <div class="form-group">
-                            <label for="opt_style">画风协议</label>
+                            <label for="opt_style">优化风格</label>
                             <select id="opt_style" class="input-modern">
                                 <option value="手机日常原生感">手机日常原生感</option>
                                 <option value="自拍专用极致真实">自拍专用极致真实</option>
@@ -413,7 +425,7 @@
                             <input type="hidden" id="opt_chain" />
                         </div>
                         <div class="form-group">
-                            <label for="opt_model">模型核心</label>
+                            <label for="opt_model">优化模型</label>
                             <input type="text" id="opt_model" class="input-modern" />
                         </div>
                         <div class="form-group">
@@ -432,12 +444,12 @@
                 </article>
             </section>
 
-            <section id="tab-presets" class="tab-pane" data-title="极速宏预设">
+            <section id="tab-presets" class="tab-pane" data-title="快捷指令">
                 <article class="card wide-card">
                     <div class="card-header space-between">
                         <div>
-                            <h3>宏指令</h3>
-                            <p>快捷指令与底层提示词映射。</p>
+                            <h3>指令预设</h3>
+                            <p>为常用提示词与参数设置一个快捷名称，原有宏指令继续可用。</p>
                         </div>
                         <button data-action="add-preset" class="btn-secondary" type="button">添加指令</button>
                     </div>
@@ -445,12 +457,13 @@
                 </article>
             </section>
 
-            <section id="tab-nodes" class="tab-pane" data-title="算力集群">
+            <section id="tab-nodes" class="tab-pane" data-title="接口节点">
+                <button class="btn-secondary gif-help-trigger" data-action="show-gif-help" type="button">GPT Image 2.6 · GIF 使用说明</button>
                 <article class="card wide-card">
                     <div class="card-header space-between">
                         <div>
-                            <h3>图像算力节点</h3>
-                            <p>OpenAI Images、Chat 兼容接口、Gemini 官方或自定义完整路径。</p>
+                            <h3>图像节点</h3>
+                            <p>OpenAI Images、Chat 兼容接口、Gemini 原生协议或自定义完整路径。</p>
                         </div>
                         <button data-action="add-provider" class="btn-secondary" type="button">添加生图节点</button>
                     </div>
@@ -460,7 +473,7 @@
                 <article class="card wide-card">
                     <div class="card-header space-between">
                         <div>
-                            <h3>视频渲染节点</h3>
+                            <h3>视频节点</h3>
                             <p>异步轮询、同步阻塞或 Chat 伪装协议。</p>
                         </div>
                         <button data-action="add-video-provider" class="btn-secondary" type="button">添加视频节点</button>
@@ -471,8 +484,8 @@
         </main>
     </div>
 
-    <div id="toast-container" aria-live="polite"></div>
     <noscript><div class="noscript-banner">配置页需要启用 JavaScript 才能运行。</div></noscript>
-    <script type="module" src="./app.js?v=3.4.0"></script>
+    <script defer src="./assets/ui.js?v=3.4.1-scoped-ui"></script>
+    <script type="module" src="./app.js?v=3.4.1-scoped-ui"></script>
 </body>
 </html>

@@ -9,6 +9,7 @@ from astrbot.api import logger
 from ..constants import APIType
 from ..models import PluginConfig
 from ..providers import create_provider
+from .image_options import is_gif_request, normalize_gif_options, provider_supports_gif
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class ChainRunResult:
     provider_id: str
     model: str
     elapsed_seconds: float
+    output_format: str = ""
 
 
 class ChainManager:
@@ -34,6 +36,9 @@ class ChainManager:
 
     def _apply_provider_defaults(self, provider_config: Any, kwargs: Any) -> dict:
         request_kwargs = dict(kwargs or {})
+        if is_gif_request(request_kwargs):
+            # Static default sizes can exceed the separate GIF frame/pixel budget.
+            return normalize_gif_options(request_kwargs)
         if str(request_kwargs.get("size", "") or "").strip():
             return request_kwargs
         if str(request_kwargs.get("resolution", "") or "").strip():
@@ -45,6 +50,8 @@ class ChainManager:
         return request_kwargs
 
     async def run_chain_with_metadata(self, chain_name: str, prompt: str, **kwargs: Any) -> ChainRunResult:
+        kwargs = normalize_gif_options(kwargs)
+        gif_requested = is_gif_request(kwargs)
         raw_chain = self.config.chains.get(chain_name)
         chain = []
         seen = set()
@@ -65,6 +72,10 @@ class ChainManager:
             if not provider_config:
                 skipped_errors.append(f"{provider_id}: 节点不存在")
                 logger.warning(f"⚠️ 链路 [{chain_name}] 中的节点 [{provider_id}] 不存在。")
+                continue
+            if gif_requested and not provider_supports_gif(provider_config):
+                skipped_errors.append(f"{provider_id}: GIF 需要 gpt-image-2.6-sunburst/flare 的 Images API 节点")
+                logger.warning(f"GIF 链路跳过不支持动图的节点 [{provider_id}]，不会降级为静态图。")
                 continue
             if (
                 (not provider_config.base_url or not provider_config.model)
@@ -87,8 +98,12 @@ class ChainManager:
                 return ChainRunResult(
                     image_url=result,
                     provider_id=provider_id,
-                    model=self._effective_request_model(provider_config.model, request_kwargs),
+                    model=(
+                        provider_config.model if gif_requested
+                        else self._effective_request_model(provider_config.model, request_kwargs)
+                    ),
                     elapsed_seconds=time.perf_counter() - start_time,
+                    output_format="gif" if gif_requested else "",
                 )
 
             except Exception as e:

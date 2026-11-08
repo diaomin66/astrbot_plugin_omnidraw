@@ -8,6 +8,7 @@ import os
 import time
 import uuid
 from typing import Callable, Any, AsyncGenerator, Tuple
+from urllib.parse import urlsplit
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
@@ -34,6 +35,9 @@ def guess_image_content_type(source: str, content_type: str = "", fallback: str 
         media_type = header[5:].split(";", 1)[0].strip()
         if media_type.startswith("image/"):
             return media_type
+    if lowered.startswith(("https://", "http://")):
+        source = urlsplit(source).path
+        lowered = source.lower()
     if lowered.endswith(".jpg") or lowered.endswith(".jpeg"):
         return "image/jpeg"
     if lowered.endswith(".webp"):
@@ -48,6 +52,19 @@ def guess_image_content_type(source: str, content_type: str = "", fallback: str 
         return "image/tiff"
     guessed = mimetypes.guess_type(source)[0] or ""
     return guessed if guessed.startswith("image/") else fallback
+
+
+def sniff_image_content_type(image_bytes: bytes, fallback: str = "") -> str:
+    """Prefer the encoded bytes to relay MIME headers, without re-encoding frames."""
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return fallback
 
 
 def guess_image_extension(source: str, content_type: str = "", fallback: str = "png") -> str:
@@ -85,7 +102,7 @@ def save_image_bytes(
     content_type: str = "",
 ) -> str:
     os.makedirs(directory, exist_ok=True)
-    ext = guess_image_extension(source, content_type)
+    ext = guess_image_extension(source, sniff_image_content_type(image_bytes, content_type))
     filename = f"{prefix}_{int(time.time() * 1000)}_{index}_{uuid.uuid4().hex[:8]}.{ext}"
     filepath = os.path.abspath(os.path.join(directory, filename))
     with open(filepath, "wb") as file:

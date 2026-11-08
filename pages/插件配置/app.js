@@ -49,7 +49,7 @@ const mockConfig = {
     router_config: { chain_text2img: "node_1", chain_selfie: "node_1", chain_video: "video_node_1" },
     presets: ["写真:daily smartphone portrait --size 1024x1024"],
     providers: [
-        { id: "node_1", api_type: "openai_image", base_url: "https://api.example.com/v1", model: "gpt-image-1", available_models: ["gpt-image-1", "dall-e-3"], timeout: 60, default_size: "", api_keys: "" }
+        { id: "node_1", api_type: "openai_image", base_url: "https://api.example.com/v1", model: "gpt-image-2.6-flare", available_models: ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst"], timeout: 120, default_size: "", api_keys: "" }
     ],
     video_providers: [
         { id: "video_node_1", api_type: "async_task", base_url: "https://api.example.com/v1", model: "veo", available_models: ["veo"], timeout: 300, default_size: "", api_keys: "" }
@@ -61,11 +61,8 @@ const mockConfig = {
 
 const mockUsageStats = {
     date: new Date().toISOString().slice(0, 10),
-    total: 8,
-    users: [
-        { user_id: "10001", display_name: "10001", count: 5, bonus: 2, checkin_at: Math.floor(Date.now() / 1000) - 2400, last_at: Math.floor(Date.now() / 1000) - 1800, access_level: "limited" },
-        { user_id: "10002", display_name: "10002", count: 3, bonus: 0, checkin_at: 0, last_at: Math.floor(Date.now() / 1000) - 7200, access_level: "unlimited_user" }
-    ],
+    total: 0,
+    users: [],
     quota: { enabled: false, daily_limit: 0 }
 };
 
@@ -119,10 +116,27 @@ let state = {
 };
 
 let initialized = false;
-let savedSnapshot = "";
 let dirtyState = false;
+let editRevision = 0;
 let usageRequestVersion = 0;
 let cacheRequestVersion = 0;
+let usageRequest = null;
+let cacheRequest = null;
+let usageLoaded = false;
+let cacheLoaded = false;
+let activeTabId = "tab-basic";
+const openedTabs = new Set([activeTabId]);
+const deferredPanels = new Map();
+const renderedMarkup = new WeakMap();
+const previewReferences = new Map();
+const previewObjectUrls = new Set();
+const previewRequests = new Map();
+const previewQueue = [];
+let previewObserver = null;
+let previewGeneration = 0;
+let activePreviewRequests = 0;
+// Keep fields not represented by this UI intact during a read/edit/save cycle.
+let originalConfig = {};
 
 function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -154,8 +168,27 @@ const deepFind = (obj, keys, def = "") => {
 
 const byId = (id) => document.getElementById(id);
 
+function notifyRender(root) {
+    if (root) window.dispatchEvent(new CustomEvent("omnidraw:render", { detail: { root } }));
+}
+
+function replaceMarkup(container, html) {
+    if (renderedMarkup.get(container) === html) return;
+    window.dispatchEvent(new CustomEvent("omnidraw:dispose", { detail: { root: container } }));
+    container.innerHTML = html;
+    renderedMarkup.set(container, html);
+    notifyRender(container);
+}
+
+function deferPanel(tabId, render) {
+    if (activeTabId === tabId) return false;
+    if (!deferredPanels.has(tabId)) deferredPanels.set(tabId, new Set());
+    deferredPanels.get(tabId).add(render);
+    return true;
+}
+
 function normalizeModelList(value) {
-    const source = Array.isArray(value) ? value : String(value || "").split(",");
+    const source = Array.isArray(value) ? value : String(value || "").split(/[\r\n,]+/);
     return [...new Set(source.map((item) => String(item).trim()).filter(Boolean))];
 }
 
@@ -178,9 +211,6 @@ function mergeUniqueModels(...groups) {
 
 function applyImageProviderDefaults(provider) {
     if (!provider || provider.api_type !== "gemini_official") return provider;
-    if (!String(provider.base_url || "").trim() || provider.base_url === "https://api.example.com/v1") {
-        provider.base_url = GEMINI_OFFICIAL_BASE_URL;
-    }
     provider.available_models = mergeUniqueModels(provider.available_models || [], GEMINI_DEFAULT_MODELS);
     if (!String(provider.model || "").trim()) {
         provider.model = provider.available_models[0] || GEMINI_DEFAULT_MODEL;
@@ -246,9 +276,9 @@ function normalizeUsageConfig(value = {}) {
     const normalizedMin = Number.isFinite(bonusMin) && bonusMin >= 0 ? bonusMin : 1;
     const normalizedMax = Number.isFinite(bonusMax) && bonusMax >= 0 ? bonusMax : 3;
     return {
-        enable_daily_limit: Boolean(value.enable_daily_limit),
-        daily_image_limit: Number.isFinite(limit) && limit > 0 ? limit : 20,
-        enable_checkin: Boolean(value.enable_checkin),
+        enable_daily_limit: normalizeBool(value.enable_daily_limit),
+        daily_image_limit: Number.isFinite(limit) && limit >= 0 ? limit : 20,
+        enable_checkin: normalizeBool(value.enable_checkin),
         checkin_bonus_min: normalizedMin,
         checkin_bonus_max: Math.max(normalizedMin, normalizedMax)
     };
@@ -397,10 +427,11 @@ function normalizePersonaProfiles(rawPersonaConfig = {}) {
         const name = String(source.persona_name || source.name || (index === 0 ? "默认助理" : `人设 ${index + 1}`)).trim() || (index === 0 ? "默认助理" : `人设 ${index + 1}`);
         const id = uniquePersonaId(source.id || (index === 0 ? "default" : name), index, usedIds);
         return {
+            ...source,
             id,
             persona_name: name,
-            persona_base_prompt: String(source.persona_base_prompt || source.base_prompt || ""),
-            persona_ref_image: normalizePersonaImages(source.persona_ref_image || source.persona_ref_images || source.ref_images)
+            persona_base_prompt: String(source.persona_base_prompt ?? source.base_prompt ?? ""),
+            persona_ref_image: normalizePersonaImages(source.persona_ref_image ?? source.persona_ref_images ?? source.ref_images)
         };
     });
 
@@ -458,22 +489,12 @@ function bindPersonaFields() {
 }
 
 function showToast(message, type = "success") {
-    const container = byId("toast-container");
-    const toast = document.createElement("div");
-    toast.className = `toast toast-${type}`;
-    const icon = document.createElement("span");
-    icon.className = "toast-icon";
-    icon.textContent = type === "success" ? "✓" : "!";
-    const text = document.createElement("span");
-    text.textContent = message;
-    toast.append(icon, text);
-    container.appendChild(toast);
-    setTimeout(() => toast.classList.add("toast-fadeout"), 2600);
-    setTimeout(() => toast.remove(), 2920);
+    window.dispatchEvent(new CustomEvent("omnidraw:toast", { detail: { message, type } }));
 }
 
 function setDirty(force) {
     if (!initialized) return;
+    if (typeof force !== "boolean") editRevision += 1;
     dirtyState = typeof force === "boolean" ? force : true;
     const isDirty = dirtyState;
     document.body.classList.toggle("is-dirty", isDirty);
@@ -496,7 +517,7 @@ function updateMetrics() {
     byId("metric-image-nodes").textContent = state.providers.length;
     byId("metric-video-nodes").textContent = state.video_providers.length;
     byId("metric-presets").textContent = state.presets.filter((preset) => preset.name.trim()).length;
-    byId("metric-today-images").textContent = state.usage_stats.total || 0;
+    byId("metric-today-images").textContent = usageLoaded ? (state.usage_stats.total || 0) : "—";
 }
 
 function usageAccessLabel(level) {
@@ -511,6 +532,8 @@ function usageAccessLabel(level) {
 }
 
 function renderUsageStats() {
+    updateMetrics();
+    if (deferPanel("tab-usage", renderUsageStats)) return;
     const stats = state.usage_stats || {};
     byId("usage-stat-date").textContent = stats.date || "今日";
     byId("usage-stat-total").textContent = stats.total || 0;
@@ -522,7 +545,7 @@ function renderUsageStats() {
     const container = byId("usage-users-container");
     if (!container) return;
     const users = stats.users || [];
-    container.innerHTML = users.map((user) => {
+    replaceMarkup(container, users.map((user) => {
         const label = user.display_name && user.display_name !== user.user_id
             ? `${escapeHtml(user.display_name)} · ${escapeHtml(user.user_id)}`
             : escapeHtml(user.user_id);
@@ -545,17 +568,28 @@ function renderUsageStats() {
                 <span>${quotaText}</span>
             </div>
         `;
-    }).join("") || '<div class="empty-state">今日暂无生图记录</div>';
-    updateMetrics();
+    }).join("") || `<div class="empty-state">${usageLoaded ? "今日暂无生图记录" : "统计尚未加载"}</div>`);
 }
 
 async function loadUsageStats(showToastOnSuccess = false) {
-    const requestVersion = ++usageRequestVersion;
     try {
-        const res = await bridge.apiGet("get_usage_stats");
-        if (requestVersion !== usageRequestVersion) return;
-        state.usage_stats = normalizeUsageStats(res?.stats || res || {});
-        renderUsageStats();
+        if (!usageRequest) {
+            const requestVersion = ++usageRequestVersion;
+            usageRequest = (async () => {
+                try {
+                    byId("usage-stat-date").textContent = "统计读取中...";
+                    const res = await bridge.apiGet("get_usage_stats");
+                    if (requestVersion !== usageRequestVersion) return;
+                    if (res?.success === false) throw new Error(res.message || "统计读取失败");
+                    state.usage_stats = normalizeUsageStats(res?.stats || res || {});
+                    usageLoaded = true;
+                    renderUsageStats();
+                } finally {
+                    usageRequest = null;
+                }
+            })();
+        }
+        await usageRequest;
         if (showToastOnSuccess) showToast("统计已刷新");
     } catch (error) {
         console.error(error);
@@ -565,6 +599,7 @@ async function loadUsageStats(showToastOnSuccess = false) {
 }
 
 function renderCacheStats() {
+    if (deferPanel("tab-usage", renderCacheStats)) return;
     const stats = normalizeCacheStats(state.cache_stats || {});
     state.cache_stats = stats;
     const total = stats.total || {};
@@ -579,12 +614,23 @@ function renderCacheStats() {
 }
 
 async function loadCacheStats(showToastOnSuccess = false) {
-    const requestVersion = ++cacheRequestVersion;
     try {
-        const res = await bridge.apiGet("get_cache_stats");
-        if (requestVersion !== cacheRequestVersion) return;
-        state.cache_stats = normalizeCacheStats(res?.stats || res || {});
-        renderCacheStats();
+        if (!cacheRequest) {
+            const requestVersion = ++cacheRequestVersion;
+            cacheRequest = (async () => {
+                try {
+                    const res = await bridge.apiGet("get_cache_stats");
+                    if (requestVersion !== cacheRequestVersion) return;
+                    if (res?.success === false) throw new Error(res.message || "缓存统计读取失败");
+                    state.cache_stats = normalizeCacheStats(res?.stats || res || {});
+                    cacheLoaded = true;
+                    renderCacheStats();
+                } finally {
+                    cacheRequest = null;
+                }
+            })();
+        }
+        await cacheRequest;
         if (showToastOnSuccess) showToast("缓存统计已刷新");
     } catch (error) {
         console.error(error);
@@ -600,6 +646,8 @@ async function clearCache(btn) {
     try {
         const res = await bridge.apiPost("clear_cache", {});
         if (res?.success) {
+            cacheRequestVersion += 1;
+            cacheLoaded = true;
             state.cache_stats = normalizeCacheStats(res.stats || {});
             renderCacheStats();
             const cleanup = res.cleanup || {};
@@ -609,12 +657,10 @@ async function clearCache(btn) {
         }
     } catch (error) {
         console.error(error);
-        showToast("网络错误", "error");
+        showToast(error?.message || "网络错误", "error");
     } finally {
-        setTimeout(() => {
-            btn.disabled = false;
-            btn.textContent = originalText;
-        }, 420);
+        btn.disabled = false;
+        btn.textContent = originalText;
     }
 }
 
@@ -673,16 +719,6 @@ function writeRouteChain(routeName, chain) {
     if (hiddenInput) hiddenInput.value = normalized[0] || "";
 }
 
-function bounceRoute(routeName) {
-    const def = routeDefs[routeName];
-    const control = def ? byId(def.backupToggleId)?.closest(".route-control") : null;
-    if (!control) return;
-    control.classList.remove("route-bounce");
-    void control.offsetWidth;
-    control.classList.add("route-bounce");
-    window.setTimeout(() => control.classList.remove("route-bounce"), 560);
-}
-
 function syncRouteFromHidden(routeName) {
     const def = routeDefs[routeName];
     if (!def) return;
@@ -699,8 +735,7 @@ function setRouteBackupEnabled(routeName, enabled) {
     if (!enabled) {
         writeRouteChain(routeName, [routePrimary(routeName)]);
     }
-    renderSelectors();
-    bounceRoute(routeName);
+    renderSelectors(routeName);
 }
 
 function handleRouteChipClick(chip) {
@@ -722,20 +757,18 @@ function handleRouteChipClick(chip) {
             backups.splice(existingIndex, 1);
         }
         writeRouteChain(routeName, [currentPrimary, ...backups]);
-        renderSelectors();
-        bounceRoute(routeName);
+        renderSelectors(routeName);
         setDirty();
         return;
     }
 
     backups = backups.filter((backupId) => backupId !== nodeId);
     writeRouteChain(routeName, [nodeId, ...backups]);
-    renderSelectors();
-    bounceRoute(routeName);
+    renderSelectors(routeName);
     setDirty();
 }
 
-function renderSelectors() {
+function renderSelectors(changedRoute) {
     const renderPrimaryTo = (routeName) => {
         const def = routeDefs[routeName];
         const container = byId(def.selectorId);
@@ -748,9 +781,9 @@ function renderSelectors() {
             const nodeId = node.id || node["节点ID"];
             if (!nodeId) return "";
             const isActive = nodeId === currentVal;
-            return `<button type="button" class="selector-chip ${isActive ? "active" : ""}" data-route="${routeName}" data-role="primary" data-id="${escapeHtml(nodeId)}">${escapeHtml(nodeId)}</button>`;
+            return `<button type="button" class="selector-chip ${isActive ? "active" : ""}" aria-pressed="${isActive}" data-route="${routeName}" data-role="primary" data-id="${escapeHtml(nodeId)}">${escapeHtml(nodeId)}</button>`;
         }).join("");
-        container.innerHTML = html || '<span class="empty-hint">暂无可选节点</span>';
+        replaceMarkup(container, html || '<span class="empty-hint">暂无可选节点</span>');
     };
 
     const renderBackupTo = (routeName) => {
@@ -774,9 +807,10 @@ function renderSelectors() {
             const order = backups.indexOf(nodeId);
             const isActive = order !== -1;
             const orderBadge = isActive ? `<span class="selector-chip-order">${order + 1}</span>` : "";
-            return `<button type="button" class="selector-chip ${isActive ? "active" : ""}" data-route="${routeName}" data-role="backup" data-id="${escapeHtml(nodeId)}"><span>${escapeHtml(nodeId)}</span>${orderBadge}</button>`;
+            return `<button type="button" class="selector-chip ${isActive ? "active" : ""}" aria-pressed="${isActive}" data-route="${routeName}" data-role="backup" data-id="${escapeHtml(nodeId)}"><span>${escapeHtml(nodeId)}</span>${orderBadge}</button>`;
         }).join("");
-        container.innerHTML = html || '<span class="empty-hint">暂无可选备用节点</span>';
+        replaceMarkup(container, html || '<span class="empty-hint">暂无可选备用节点</span>');
+        notifyRender(toggle.parentElement);
     };
 
     const renderSingleTo = (containerId, sourceList, inputId) => {
@@ -788,43 +822,50 @@ function renderSelectors() {
             const nodeId = node.id || node["节点ID"];
             if (!nodeId) return "";
             const isActive = nodeId === currentVal;
-            return `<button type="button" class="selector-chip ${isActive ? "active" : ""}" data-id="${escapeHtml(nodeId)}" data-input="${escapeHtml(inputId)}">${escapeHtml(nodeId)}</button>`;
+            return `<button type="button" class="selector-chip ${isActive ? "active" : ""}" aria-pressed="${isActive}" data-id="${escapeHtml(nodeId)}" data-input="${escapeHtml(inputId)}">${escapeHtml(nodeId)}</button>`;
         }).join("");
-        container.innerHTML = html || '<span class="empty-hint">暂无可选节点</span>';
+        replaceMarkup(container, html || '<span class="empty-hint">暂无可选节点</span>');
     };
 
-    renderPrimaryTo("text2img");
-    renderBackupTo("text2img");
-    renderPrimaryTo("selfie");
-    renderBackupTo("selfie");
-    renderSingleTo("sel-opt-chain", state.providers, "opt_chain");
-    renderPrimaryTo("video");
-    renderBackupTo("video");
+    if (!deferPanel("tab-hub", renderSelectors)) {
+        for (const routeName of (routeDefs[changedRoute] ? [changedRoute] : Object.keys(routeDefs))) {
+            renderPrimaryTo(routeName);
+            renderBackupTo(routeName);
+        }
+    }
+    if (!deferPanel("tab-optimizer", renderSelectors)) {
+        renderSingleTo("sel-opt-chain", state.providers, "opt_chain");
+    }
 }
 
 function renderPersonaProfiles() {
+    if (deferPanel("tab-persona", renderPersonaProfiles)) return;
     const container = byId("persona-profiles-container");
     if (!container) return;
     syncActivePersonaMirror();
     const profiles = state.persona_config.profiles || [];
-    container.innerHTML = profiles.map((profile, index) => {
+    replaceMarkup(container, profiles.map((profile, index) => {
         const isActive = profile.id === state.persona_config.active_persona_id;
         const deleteControl = profiles.length > 1
-            ? `<span class="persona-profile-delete" data-action="del-persona" data-index="${index}" title="删除人设">×</span>`
+            ? `<button type="button" class="persona-profile-delete" data-action="del-persona" data-index="${index}" aria-label="删除人设 ${escapeHtml(profile.persona_name)}" title="删除人设">×</button>`
             : "";
         return `
-            <button type="button" class="persona-profile-chip ${isActive ? "active" : ""}" data-action="switch-persona" data-index="${index}">
-                <span class="persona-profile-name">${escapeHtml(profile.persona_name || "未命名人设")}</span>
-                <small>${escapeHtml(profile.id)} · ${normalizePersonaImages(profile.persona_ref_image).length} 图</small>
+            <div class="persona-profile">
+                <button type="button" class="persona-profile-chip ${isActive ? "active" : ""}" data-action="switch-persona" data-index="${index}" aria-pressed="${isActive}">
+                    <span class="persona-profile-name">${escapeHtml(profile.persona_name || "未命名人设")}</span>
+                    <small>${escapeHtml(profile.id)} · ${normalizePersonaImages(profile.persona_ref_image).length} 图</small>
+                </button>
                 ${deleteControl}
-            </button>
+            </div>
         `;
-    }).join("");
+    }).join(""));
 }
 
 function renderPersonaImages() {
+    if (deferPanel("tab-persona", renderPersonaImages)) return;
     const container = byId("persona-upload-container");
     if (!container) return;
+    releasePersonaPreviews();
     syncActivePersonaMirror();
     container.querySelectorAll(".image-preview-wrapper").forEach((el) => el.remove());
     const trigger = byId("persona-upload-trigger");
@@ -833,9 +874,11 @@ function renderPersonaImages() {
         const wrapper = document.createElement("div");
         wrapper.className = "image-preview-wrapper";
         const img = document.createElement("img");
-        img.src = String(url || "");
+        const imageRef = String(url || "");
+        previewReferences.set(img, imageRef);
         img.referrerPolicy = "no-referrer";
         img.loading = "lazy";
+        img.decoding = "async";
         img.className = "image-preview";
         img.alt = `Reference ${idx + 1}`;
         const button = document.createElement("button");
@@ -843,35 +886,146 @@ function renderPersonaImages() {
         button.dataset.action = "del-persona-img";
         button.dataset.index = String(idx);
         button.type = "button";
+        button.setAttribute("aria-label", `删除参考图 ${idx + 1}`);
         button.textContent = "×";
-        wrapper.append(img, button);
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "btn-secondary";
+        retry.textContent = "重试预览";
+        retry.hidden = true;
+        retry.addEventListener("click", () => queuePersonaPreview(img, retry));
+        wrapper.append(img, button, retry);
         container.insertBefore(wrapper, trigger);
+        if (pagePreviewToken(imageRef)) {
+            img.alt = `参考图 ${idx + 1}（加载中）`;
+            if (typeof IntersectionObserver === "undefined") queuePersonaPreview(img, retry);
+            else {
+                previewObserver ??= new IntersectionObserver((entries) => {
+                    entries.forEach((entry) => {
+                        if (!entry.isIntersecting) return;
+                        previewObserver?.unobserve(entry.target);
+                        queuePersonaPreview(entry.target, entry.target.parentElement.querySelector(".btn-secondary"));
+                    });
+                }, { rootMargin: "128px" });
+                previewObserver.observe(img);
+            }
+        } else {
+            img.src = imageRef;
+        }
     });
+    notifyRender(container);
+}
+
+function pagePreviewToken(ref) {
+    try {
+        const parsed = new URL(ref, location.href);
+        return parsed.pathname.endsWith("/astrbot_plugin_omnidraw/get_image") ? parsed.searchParams.get("token") : null;
+    } catch {
+        return null;
+    }
+}
+
+function releasePersonaPreviews() {
+    previewGeneration += 1;
+    previewObserver?.disconnect();
+    previewObserver = null;
+    previewQueue.length = 0;
+    previewReferences.forEach((_, image) => image.removeAttribute("src"));
+    previewReferences.clear();
+    previewObjectUrls.forEach((url) => URL.revokeObjectURL(url));
+    previewObjectUrls.clear();
+}
+
+function queuePersonaPreview(image, retry) {
+    retry.hidden = true;
+    image.alt = "参考图加载中...";
+    previewQueue.push({ image, retry, generation: previewGeneration });
+    pumpPersonaPreviews();
+}
+
+function pumpPersonaPreviews() {
+    while (activePreviewRequests < 3 && previewQueue.length) {
+        const task = previewQueue.shift();
+        const { image, retry, generation } = task;
+        const ref = previewReferences.get(image);
+        if (!ref || generation !== previewGeneration || !image.isConnected) continue;
+        activePreviewRequests += 1;
+        const requestKey = `${generation}:${ref}`;
+        if (!previewRequests.has(requestKey)) {
+            previewRequests.set(requestKey, (async () => {
+                // The host SDK only transports authorized JSON. Never put its
+                // protected image endpoint directly into an unauthenticated src.
+                const result = await bridge.apiGet("get_image", { token: pagePreviewToken(ref), format: "data_url" });
+                if (!result?.success || !/^data:image\//i.test(result.data_url || "")) {
+                    throw new Error(result?.message || "参考图预览加载失败");
+                }
+                return await (await fetch(result.data_url)).blob();
+            })());
+        }
+        void (async () => {
+            try {
+                const blob = await previewRequests.get(requestKey);
+                if (generation !== previewGeneration || !image.isConnected) return;
+                const objectUrl = URL.createObjectURL(blob);
+                previewObjectUrls.add(objectUrl);
+                image.src = objectUrl;
+                image.alt = "人设参考图";
+            } catch (error) {
+                if (generation !== previewGeneration || !image.isConnected) return;
+                image.alt = "参考图预览加载失败";
+                image.title = error?.message || "请重试";
+                retry.hidden = false;
+            } finally {
+                previewRequests.delete(requestKey);
+                activePreviewRequests -= 1;
+                pumpPersonaPreviews();
+            }
+        })();
+    }
 }
 
 function renderPresets() {
+    updateMetrics();
+    if (deferPanel("tab-presets", renderPresets)) return;
     const html = state.presets.map((p, i) => `
         <div class="list-item">
-            <input type="text" class="input-glass preset-name" placeholder="快捷指令名" value="${escapeHtml(p.name)}" data-sync="preset-name" data-index="${i}">
+            <input type="text" class="input-glass preset-name" aria-label="快捷指令名称 ${i + 1}" placeholder="快捷指令名" value="${escapeHtml(p.name)}" data-sync="preset-name" data-index="${i}">
             <span class="preset-arrow">→</span>
-            <input type="text" class="input-glass preset-prompt" placeholder="底层提示词与参数" value="${escapeHtml(p.prompt)}" data-sync="preset-prompt" data-index="${i}">
+            <input type="text" class="input-glass preset-prompt" aria-label="快捷指令提示词 ${i + 1}" placeholder="提示词与参数" value="${escapeHtml(p.prompt)}" data-sync="preset-prompt" data-index="${i}">
             <button data-action="del-preset" data-index="${i}" class="btn-glass-secondary btn-danger" type="button">移除</button>
         </div>
     `).join("");
-    byId("presets-container").innerHTML = html || '<div class="empty-state">尚未配置快捷指令</div>';
-    updateMetrics();
+    replaceMarkup(byId("presets-container"), html || '<div class="empty-state">尚未配置快捷指令</div>');
 }
 
-function renderProviders() {
-    const html = state.providers.map((p, i) => renderProviderCard(p, i, false)).join("");
-    byId("providers-container").innerHTML = html || '<div class="empty-state">尚未配置图像节点</div>';
-    updateMetrics();
+function renderProviderList(isVideo, index) {
+    const list = isVideo ? state.video_providers : state.providers;
+    const container = byId(isVideo ? "video-providers-container" : "providers-container");
+    if (Number.isInteger(index) && container.children[index]?.classList.contains("node-card")) {
+        const card = container.children[index];
+        const template = document.createElement("template");
+        template.innerHTML = renderProviderCard(list[index], index, isVideo);
+        window.dispatchEvent(new CustomEvent("omnidraw:dispose", { detail: { root: card } }));
+        const replacement = template.content.firstElementChild;
+        card.replaceWith(replacement);
+        renderedMarkup.delete(container);
+        notifyRender(replacement);
+    } else {
+        const html = list.map((p, i) => renderProviderCard(p, i, isVideo)).join("");
+        replaceMarkup(container, html || `<div class="empty-state">尚未配置${isVideo ? "视频" : "图像"}节点</div>`);
+    }
 }
 
-function renderVideoProviders() {
-    const html = state.video_providers.map((p, i) => renderProviderCard(p, i, true)).join("");
-    byId("video-providers-container").innerHTML = html || '<div class="empty-state">尚未配置视频节点</div>';
+function renderProviders(index) {
     updateMetrics();
+    if (deferPanel("tab-nodes", renderProviders)) return;
+    renderProviderList(false, index);
+}
+
+function renderVideoProviders(index) {
+    updateMetrics();
+    if (deferPanel("tab-nodes", renderVideoProviders)) return;
+    renderProviderList(true, index);
 }
 
 function renderProviderCard(p, i, isVideo) {
@@ -895,20 +1049,20 @@ function renderProviderCard(p, i, isVideo) {
 
     const modeChips = modes.map(([value, label]) => {
         const active = isVideo ? (p.api_type || "").includes(value) : p.api_type === value;
-        return `<button type="button" class="api-chip ${active ? "active" : ""}" data-sync="${prefix}-api" data-index="${i}" data-val="${value}">${label}</button>`;
+        return `<button type="button" class="api-chip ${active ? "active" : ""}" data-sync="${prefix}-api" data-index="${i}" data-val="${value}" aria-pressed="${active}">${label}</button>`;
     }).join("");
 
     const modelChips = (p.available_models || []).map((model, modelIdx) => `
-        <button type="button" class="api-chip ${p.model === model ? "active" : ""}" data-sync="${prefix}-model-select" data-index="${i}" data-val="${escapeHtml(model)}">
-            <span>${escapeHtml(model)}</span>
-            <span class="chip-del" data-action="${delModelAction}" data-index="${i}" data-midx="${modelIdx}">×</span>
-        </button>
+        <span class="model-chip ${p.model === model ? "active" : ""}">
+            <button type="button" class="api-chip ${p.model === model ? "active" : ""}" data-sync="${prefix}-model-select" data-index="${i}" data-val="${escapeHtml(model)}" aria-pressed="${p.model === model}">${escapeHtml(model)}</button>
+            <button type="button" class="chip-del" data-action="${delModelAction}" data-index="${i}" data-midx="${modelIdx}" aria-label="移除模型 ${escapeHtml(model)}">×</button>
+        </span>
     `).join("") || '<span class="empty-hint">暂无模型</span>';
 
     return `
         <div class="node-card">
             <div class="node-card-header">
-                <input type="text" class="input-glass node-id-input" placeholder="${isVideo ? "视频节点 ID" : "图像节点 ID"}" value="${escapeHtml(p.id)}" data-sync="${prefix}-id" data-index="${i}">
+                <input type="text" class="input-glass node-id-input" aria-label="${isVideo ? "视频节点 ID" : "图像节点 ID"}" placeholder="${isVideo ? "视频节点 ID" : "图像节点 ID"}" value="${escapeHtml(p.id)}" data-sync="${prefix}-id" data-index="${i}">
                 <button data-action="${delAction}" data-index="${i}" class="btn-ghost btn-danger" type="button">移除节点</button>
             </div>
             <div class="node-form-grid">
@@ -917,28 +1071,31 @@ function renderProviderCard(p, i, isVideo) {
                     <div class="chip-group">${modeChips}</div>
                 </div>
                 <div class="form-group">
-                    <label>接口地址</label>
-                    <input type="text" class="input-glass" value="${escapeHtml(p.base_url)}" data-sync="${prefix}-url" data-index="${i}">
+                    <label for="${prefix}-url-${i}">接口地址</label>
+                    <input id="${prefix}-url-${i}" type="text" class="input-glass" value="${escapeHtml(p.base_url)}" placeholder="${!isVideo && p.api_type === "gemini_official" ? GEMINI_OFFICIAL_BASE_URL : ""}" data-sync="${prefix}-url" data-index="${i}">
+                    ${!isVideo && p.api_type === "gemini_official" ? '<p class="field-hint">Gemini 原生协议，可填写中转地址；仅留空时使用 Google 默认地址。与 OpenAI Chat 协议不同。</p>' : ""}
                 </div>
                 <div class="form-group full-width">
-                    <label>${isVideo ? "视频模型池" : "算力模型池"}</label>
+                    <label for="${modelInputId}">${isVideo ? "视频模型" : "图像模型"}</label>
                     <div class="chip-group">${modelChips}</div>
                     <div class="model-row">
                         <input type="text" class="input-glass" id="${modelInputId}" data-model-input="${isVideo ? "video" : "image"}" data-index="${i}" placeholder="${isVideo ? "输入视频模型名称" : "输入新模型名称"}">
                         <button data-action="${addModelAction}" data-index="${i}" class="btn-glass-secondary" type="button">添加模型</button>
                     </div>
+                    ${!isVideo && p.api_type === "openai_image" && /^gpt-image-2\.6-(?:sunburst|flare)(?:-\d{4}-\d{2}-\d{2})?$/.test(p.model) ? '<p class="field-hint">此模型可请求 GIF；需要服务商开放 GIF preview 权限。使用 /gif，尺寸建议 auto。</p>' : ""}
                 </div>
                 <div class="form-group">
-                    <label>请求超时</label>
-                    <input type="number" class="input-glass" value="${escapeHtml(p.timeout)}" min="1" max="3600" data-sync="${prefix}-time" data-index="${i}">
+                    <label for="${prefix}-time-${i}">请求超时（秒）</label>
+                    <input id="${prefix}-time-${i}" type="number" class="input-glass" value="${escapeHtml(p.timeout)}" min="1" max="3600" data-sync="${prefix}-time" data-index="${i}">
                 </div>
                 <div class="form-group">
-                    <label>默认尺寸</label>
-                    <input type="text" class="input-glass" value="${escapeHtml(p.default_size || "")}" placeholder="${isVideo ? "1280x720" : "1024x1024"}" data-sync="${prefix}-size" data-index="${i}">
+                    <label for="${prefix}-size-${i}">默认尺寸</label>
+                    <input id="${prefix}-size-${i}" type="text" class="input-glass" value="${escapeHtml(p.default_size || "")}" placeholder="${isVideo ? "1280x720" : "留空由接口决定"}" data-sync="${prefix}-size" data-index="${i}">
                 </div>
                 <div class="form-group full-width">
-                    <label>API Keys</label>
-                    <textarea class="input-glass" rows="3" data-sync="${prefix}-keys" data-index="${i}">${escapeHtml(p.api_keys)}</textarea>
+                    <label for="${prefix}-keys-${i}">API Keys</label>
+                    <textarea id="${prefix}-keys-${i}" class="input-glass" rows="3" spellcheck="false" autocomplete="off" data-sync="${prefix}-keys" data-index="${i}">${escapeHtml(p.api_keys)}</textarea>
+                    <p class="field-hint">每行一个密钥。已保存密钥仅显示脱敏值，保持不变即可继续使用。</p>
                 </div>
             </div>
         </div>
@@ -951,7 +1108,7 @@ function bindBasicFields() {
     byId("perm_blocked_users").value = state.permission_config.blocked_users || "";
     byId("perm_unlimited_groups").value = state.permission_config.unlimited_groups || "";
     byId("usage_enable").checked = Boolean(state.usage_config.enable_daily_limit);
-    byId("usage_daily_limit").value = state.usage_config.daily_image_limit || 20;
+    byId("usage_daily_limit").value = state.usage_config.daily_image_limit ?? 20;
     byId("usage_checkin_enable").checked = Boolean(state.usage_config.enable_checkin);
     byId("usage_checkin_min").value = state.usage_config.checkin_bonus_min ?? 1;
     byId("usage_checkin_max").value = state.usage_config.checkin_bonus_max ?? 3;
@@ -967,8 +1124,12 @@ function bindBasicFields() {
     byId("route_selfie").value = routePrimary("selfie") || "node_1";
     byId("route_video").value = routePrimary("video") || "video_node_1";
     bindPersonaFields();
-    byId("opt_enable").checked = Boolean(state.optimizer_config.enable_optimizer);
-    byId("opt_astrbot").checked = Boolean(state.optimizer_config.use_astrbot_provider);
+    byId("opt_enable").checked = normalizeBool(state.optimizer_config.enable_optimizer);
+    byId("opt_astrbot").checked = normalizeBool(state.optimizer_config.use_astrbot_provider);
+    const style = state.optimizer_config.optimizer_style;
+    if (style && !Array.from(byId("opt_style").options).some((option) => option.value === style)) {
+        byId("opt_style").add(new Option(style, style));
+    }
     byId("opt_style").value = state.optimizer_config.optimizer_style || "手机日常原生感";
     byId("opt_chain").value = state.optimizer_config.chain_optimizer || "node_1";
     byId("opt_model").value = state.optimizer_config.optimizer_model || "gpt-4o-mini";
@@ -985,8 +1146,21 @@ function readBasicFields() {
     state.permission_config.allowed_users = normalizeIdText(byId("perm_allowed_users").value);
     state.permission_config.blocked_users = normalizeIdText(byId("perm_blocked_users").value);
     state.permission_config.unlimited_groups = normalizeIdText(byId("perm_unlimited_groups").value);
+    const permissionAliases = {
+        usable_users: ["access_users", "use_whitelist"],
+        allowed_users: ["unlimited_users", "user_whitelist"],
+        blocked_users: ["user_blacklist"],
+        unlimited_groups: ["group_whitelist"]
+    };
+    Object.entries(permissionAliases).forEach(([key, aliases]) => {
+        aliases.forEach((alias) => {
+            if (Object.hasOwn(state.permission_config, alias)) {
+                state.permission_config[alias] = state.permission_config[key];
+            }
+        });
+    });
     state.usage_config.enable_daily_limit = byId("usage_enable").checked;
-    state.usage_config.daily_image_limit = Math.max(1, parseInt(byId("usage_daily_limit").value, 10) || 20);
+    state.usage_config.daily_image_limit = readNonnegativeIntInput("usage_daily_limit", 20);
     state.usage_config.enable_checkin = byId("usage_checkin_enable").checked;
     state.usage_config.checkin_bonus_min = readNonnegativeIntInput("usage_checkin_min", 0);
     state.usage_config.checkin_bonus_max = readNonnegativeIntInput("usage_checkin_max", 0);
@@ -1018,9 +1192,10 @@ function readBasicFields() {
     state.show_request_model = byId("show_request_model").checked;
 }
 
-function buildPayload() {
-    readBasicFields();
+function buildPayload(readForm = true) {
+    if (readForm) readBasicFields();
     return {
+        ...originalConfig,
         permission_config: state.permission_config,
         usage_config: state.usage_config,
         cache_config: state.cache_config,
@@ -1082,7 +1257,7 @@ function validateConfig() {
     if (!state.persona_config.profiles.length) return "至少需要保留一个人设";
     if (personaNames.some((name) => !name)) return "人设名称不能为空";
     if (duplicatePersonaIds.length) return `人设 ID 重复：${duplicatePersonaIds[0]}`;
-    if (state.usage_config.enable_daily_limit && state.usage_config.daily_image_limit <= 0) return "每日生图上限必须大于 0";
+    if (state.usage_config.enable_daily_limit && parseInt(byId("usage_daily_limit").value, 10) < 0) return "每日生图上限不能小于 0";
     return validateList(state.providers, "图像")
         || validateList(state.video_providers, "视频")
         || validateRoute("text2img", "图像生成")
@@ -1094,13 +1269,42 @@ function setActiveTab(navItem) {
     const targetId = navItem.getAttribute("data-target");
     const targetPane = byId(targetId);
     if (!targetPane) return;
-    const content = document.querySelector(".content");
-    content?.classList.add("is-switching");
-    document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item === navItem));
+    if (activeTabId === "tab-persona" && targetId !== activeTabId) {
+        releasePersonaPreviews();
+        if (!deferredPanels.has("tab-persona")) deferredPanels.set("tab-persona", new Set());
+        deferredPanels.get("tab-persona").add(renderPersonaImages);
+    }
+    document.querySelectorAll(".nav-item").forEach((item) => {
+        item.classList.toggle("active", item === navItem);
+        if (item === navItem) item.setAttribute("aria-current", "page");
+        else item.removeAttribute("aria-current");
+    });
     document.querySelectorAll(".tab-pane").forEach((pane) => pane.classList.toggle("active", pane === targetPane));
+    activeTabId = targetId;
+    const deferred = deferredPanels.get(targetId);
+    deferredPanels.delete(targetId);
+    deferred?.forEach((render) => render());
+    if (!openedTabs.has(targetId)) {
+        openedTabs.add(targetId);
+        notifyRender(targetPane);
+    }
+    notifyRender(navItem.parentElement);
+    if (targetId === "tab-usage") {
+        if (!usageLoaded) void loadUsageStats(false);
+        if (!cacheLoaded) void loadCacheStats(false);
+    }
     byId("active-title").textContent = targetPane.dataset.title || navItem.textContent.trim();
-    navItem.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
-    window.setTimeout(() => content?.classList.remove("is-switching"), 260);
+    const descriptions = {
+        "tab-basic": "管理使用权限与消息显示，现有配置无需迁移。",
+        "tab-usage": "查看用量、设置每日额度与管理图片缓存。",
+        "tab-persona": "管理人设描述与参考图，保留每个角色的独立配置。",
+        "tab-hub": "为图像、自拍和视频选择主节点与有序备用链路。",
+        "tab-optimizer": "设置提示词优化节点、风格与补充要求。",
+        "tab-presets": "将常用提示词与参数保存为快捷指令。",
+        "tab-nodes": "管理接口、模型与密钥，保留所有原有调用方式。"
+    };
+    document.querySelector(".topbar-caption").textContent = descriptions[targetId] || "";
+    navItem.scrollIntoView({ behavior: "instant", inline: "nearest", block: "nearest" });
 }
 
 function animateAdd(containerId) {
@@ -1108,28 +1312,15 @@ function animateAdd(containerId) {
         const container = byId(containerId);
         const el = container?.lastElementChild;
         if (!el) return;
-        el.classList.add("node-enter");
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.scrollIntoView({ behavior: "instant", block: "nearest" });
     }, 10);
 }
 
 function animateDel(containerId, stateArray, index, renderFn, callback) {
-    const container = byId(containerId);
-    const el = container?.children[index];
-    if (!el) {
-        stateArray.splice(index, 1);
-        renderFn();
-        callback?.();
-        setDirty();
-        return;
-    }
-    el.classList.add("node-exit");
-    setTimeout(() => {
-        stateArray.splice(index, 1);
-        renderFn();
-        callback?.();
-        setDirty();
-    }, 220);
+    stateArray.splice(index, 1);
+    renderFn();
+    callback?.();
+    setDirty();
 }
 
 function addModel(kind, idx) {
@@ -1145,7 +1336,7 @@ function addModel(kind, idx) {
     list[idx].available_models.push(newModel);
     if (!list[idx].model) list[idx].model = newModel;
     input.value = "";
-    isVideo ? renderVideoProviders() : renderProviders();
+    isVideo ? renderVideoProviders(idx) : renderProviders(idx);
     setDirty();
 }
 
@@ -1203,27 +1394,18 @@ function deletePersona(index) {
 
 function setupEventDelegation() {
     const fileInput = byId("hidden-file-input");
-    const pressableSelector = ".nav-item, .btn-primary, .btn-secondary, .btn-glass-secondary, .btn-ghost, .upload-trigger, .selector-chip, .api-chip, .persona-profile-chip";
+    document.querySelectorAll(".ios-switch").forEach((input) => {
+        if (input.hasAttribute("aria-label")) return;
+        const heading = input.closest(".setting-row, .card-header")?.querySelector("h3")?.textContent;
+        const route = input.closest(".route-row")?.querySelector(":scope > label")?.textContent;
+        input.setAttribute("aria-label", heading || `${route || ""} ${input.labels?.[0]?.textContent || "开关"}`.trim());
+    });
 
     window.addEventListener("beforeunload", (event) => {
         if (!dirtyState) return;
         event.preventDefault();
         event.returnValue = "";
     });
-
-    document.body.addEventListener("pointerdown", (e) => {
-        const target = e.target.closest(pressableSelector);
-        if (!target || target.disabled) return;
-        target.classList.add("is-pressing");
-    });
-
-    const clearPressed = () => {
-        document.querySelectorAll(".is-pressing").forEach((item) => item.classList.remove("is-pressing"));
-    };
-    document.addEventListener("pointerup", clearPressed);
-    document.addEventListener("pointercancel", clearPressed);
-    document.addEventListener("pointerleave", clearPressed);
-    document.addEventListener("click", clearPressed);
 
     document.body.addEventListener("click", (e) => {
         const navItem = e.target.closest(".nav-item");
@@ -1240,8 +1422,14 @@ function setupEventDelegation() {
             }
             const inputId = chip.getAttribute("data-input");
             byId(inputId).value = chip.getAttribute("data-id");
-            document.querySelectorAll(`.selector-chip[data-input="${inputId}"]`).forEach((item) => item.classList.remove("active"));
+            document.querySelectorAll(`.selector-chip[data-input="${inputId}"]`).forEach((item) => {
+                item.classList.remove("active");
+                item.setAttribute("aria-pressed", "false");
+            });
             chip.classList.add("active");
+            chip.setAttribute("aria-pressed", "true");
+            renderedMarkup.delete(chip.parentElement);
+            notifyRender(chip.parentElement);
             setDirty();
             return;
         }
@@ -1258,7 +1446,7 @@ function setupEventDelegation() {
             if (sync === "vid-api") state.video_providers[idx].api_type = val;
             if (sync === "prov-model-select") state.providers[idx].model = val;
             if (sync === "vid-model-select") state.video_providers[idx].model = val;
-            sync.startsWith("vid") ? renderVideoProviders() : renderProviders();
+            sync.startsWith("vid") ? renderVideoProviders(idx) : renderProviders(idx);
             setDirty();
             return;
         }
@@ -1334,14 +1522,14 @@ function setupEventDelegation() {
             const modelIdx = parseInt(btn.getAttribute("data-midx"), 10);
             const removed = state.providers[idx].available_models.splice(modelIdx, 1)[0];
             if (state.providers[idx].model === removed) state.providers[idx].model = state.providers[idx].available_models[0] || "";
-            renderProviders();
+            renderProviders(idx);
             setDirty();
         }
         if (act === "del-vid-model") {
             const modelIdx = parseInt(btn.getAttribute("data-midx"), 10);
             const removed = state.video_providers[idx].available_models.splice(modelIdx, 1)[0];
             if (state.video_providers[idx].model === removed) state.video_providers[idx].model = state.video_providers[idx].available_models[0] || "";
-            renderVideoProviders();
+            renderVideoProviders(idx);
             setDirty();
         }
     });
@@ -1451,6 +1639,7 @@ function setupEventDelegation() {
 }
 
 async function saveConfig(btn) {
+    if (!initialized || btn.disabled) return;
     const validationError = validateConfig();
     if (validationError) {
         showToast(validationError, "error");
@@ -1460,32 +1649,83 @@ async function saveConfig(btn) {
     const originalText = btn.textContent;
     btn.textContent = "保存中...";
     try {
-        const payload = buildPayload();
+        const payload = structuredClone(buildPayload(false));
+        const submittedRevision = editRevision;
         const res = await bridge.apiPost("save_config", payload);
         if (res?.success) {
-            state.providers.forEach((provider) => {
-                provider.api_keys = maskApiKeyText(provider.api_keys);
+            const editedDuringSave = editRevision !== submittedRevision;
+            ["providers", "video_providers"].forEach((key) => {
+                const submittedById = new Map(payload[key].map((item) => [item.id, item]));
+                state[key].forEach((provider, index) => {
+                    const submitted = submittedById.get(provider.id);
+                    if (submitted && submitted.api_keys === provider.api_keys) {
+                        provider.api_keys = maskApiKeyText(provider.api_keys);
+                        const input = byId(`${key === "providers" ? "prov" : "vid"}-keys-${index}`);
+                        if (input) input.value = provider.api_keys;
+                    }
+                });
+                renderedMarkup.delete(byId(key === "providers" ? "providers-container" : "video-providers-container"));
             });
-            state.video_providers.forEach((provider) => {
-                provider.api_keys = maskApiKeyText(provider.api_keys);
-            });
-            renderProviders();
-            renderVideoProviders();
-            savedSnapshot = JSON.stringify(buildPayload());
-            setDirty(false);
+            applySavedPersonaRefs(payload.persona_config, res.persona_refs);
+            setDirty(editedDuringSave);
             renderUsageStats();
-            showToast("配置已保存");
+            showToast(editedDuringSave ? "已保存提交的配置，仍有后续修改待保存" : window.AstrBotPluginPage ? "配置已保存" : "本地预览：未写入实际配置");
         } else {
             showToast(res?.message || "保存失败", "error");
         }
     } catch (error) {
         console.error(error);
-        showToast("网络错误", "error");
+        showToast(error?.message || "网络错误", "error");
     } finally {
-        setTimeout(() => {
-            btn.disabled = false;
-            btn.textContent = originalText;
-        }, 420);
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
+
+function applySavedPersonaRefs(submitted, saved) {
+    if (!saved || !Array.isArray(saved.profiles)) return;
+    const replacements = new Map();
+    const mapRefs = (before, after) => {
+        if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length) return;
+        before.forEach((ref, index) => {
+            if (typeof ref === "string" && typeof after[index] === "string" && after[index] && ref !== after[index]) {
+                replacements.set(ref, after[index]);
+            }
+        });
+    };
+    const savedProfiles = new Map(saved.profiles.map((profile) => [profile.id, profile]));
+    submitted.profiles.forEach((profile) => mapRefs(profile.persona_ref_image, savedProfiles.get(profile.id)?.persona_ref_image));
+    mapRefs(submitted.persona_ref_image, saved.persona_ref_image);
+    if (!replacements.size) return;
+    // A save response may arrive after another edit. Replace matching references
+    // only; never restore submitted profile arrays over the current state.
+    state.persona_config.profiles.forEach((profile) => {
+        profile.persona_ref_image = profile.persona_ref_image.map((ref) => replacements.get(ref) || ref);
+    });
+    syncActivePersonaMirror();
+    previewReferences.forEach((ref, image) => {
+        const replacement = replacements.get(ref);
+        if (replacement) previewReferences.set(image, replacement);
+    });
+}
+
+function isUnsupportedPageConfig(error) {
+    const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status);
+    const message = String(error?.message || error || "");
+    return status === 404 || error?.code === "NOT_FOUND" || error?.code === "UNSUPPORTED_API"
+        || /\b404\b|unknown (?:api|endpoint)|unsupported (?:api|endpoint)|get_page_config.*not found|(?:接口|API).*(?:不存在|不支持)/i.test(message);
+}
+
+async function loadPageConfig() {
+    try {
+        const response = await bridge.apiGet("get_page_config");
+        if (response?.success === false) throw Object.assign(new Error(response.message || "配置读取失败"), response);
+        return response || {};
+    } catch (error) {
+        if (!isUnsupportedPageConfig(error)) throw error;
+        const response = await bridge.apiGet("get_config");
+        if (response?.success === false) throw new Error(response.message || "配置读取失败");
+        return response || {};
     }
 }
 
@@ -1494,69 +1734,74 @@ async function init() {
     const pageStatus = byId("page-status");
     try {
         await bridge.ready();
-        const rawConfig = await bridge.apiGet("get_config") || {};
-    const perm = rawConfig.permission_config || rawConfig;
-    const pers = rawConfig.persona_config || rawConfig;
-    const opt = rawConfig.optimizer_config || rawConfig;
-    const route = rawConfig.router_config || rawConfig;
+        const rawConfig = await loadPageConfig();
+        originalConfig = rawConfig;
+        const perm = rawConfig.permission_config || rawConfig;
+        const pers = rawConfig.persona_config || rawConfig;
+        const opt = rawConfig.optimizer_config || rawConfig;
+        const route = rawConfig.router_config || rawConfig;
 
-    state.permission_config = normalizePermissionConfig(perm);
-    state.usage_config = normalizeUsageConfig(rawConfig.usage_config || {});
-    state.cache_config = normalizeCacheConfig(rawConfig.cache_config || {});
-    state.reply_config = normalizeReplyConfig(rawConfig.reply_config || {});
-    state.router_config.chain_text2img = joinChain(splitChain(deepFind(route, ["chain_text2img"], "node_1"))) || "node_1";
-    state.router_config.chain_selfie = joinChain(splitChain(deepFind(route, ["chain_selfie"], "node_1"))) || "node_1";
-    state.router_config.chain_video = joinChain(splitChain(deepFind(route, ["chain_video"], "video_node_1"))) || "video_node_1";
-    state.route_backup_enabled = {
-        text2img: splitChain(state.router_config.chain_text2img).length > 1,
-        selfie: splitChain(state.router_config.chain_selfie).length > 1,
-        video: splitChain(state.router_config.chain_video).length > 1
-    };
-    state.persona_config = normalizePersonaProfiles(pers);
-
-    state.optimizer_config.enable_optimizer = deepFind(opt, ["enable_optimizer"], true);
-    state.optimizer_config.use_astrbot_provider = deepFind(opt, ["use_astrbot_provider"], false);
-    state.optimizer_config.optimizer_style = deepFind(opt, ["optimizer_style"], "手机日常原生感");
-    state.optimizer_config.chain_optimizer = deepFind(opt, ["chain_optimizer"], "node_1");
-    state.optimizer_config.optimizer_model = deepFind(opt, ["optimizer_model"], "gpt-4o-mini");
-    state.optimizer_config.optimizer_timeout = parseFloat(deepFind(opt, ["optimizer_timeout"], 15)) || 15;
-    state.optimizer_config.max_batch_count = parseInt(deepFind(opt, ["max_batch_count"], 0), 10) || 0;
-    state.optimizer_config.optimizer_custom_prompt = deepFind(opt, ["optimizer_custom_prompt"]);
-
-    state.presets = (rawConfig.presets || []).map(parsePreset);
-    state.providers = (rawConfig.providers || []).map((p) => {
-        const availableModels = normalizeModelList(p.available_models?.length ? p.available_models : (p.model || p["模型名称"] || ""));
-        const model = p.model && !String(p.model).includes(",") ? p.model : (availableModels[0] || "");
-        return {
-            id: p.id || p["节点ID"] || "",
-            api_type: p.api_type || p["接口模式"] || "openai_image",
-            base_url: p.base_url || p["接口地址 (需含/v1)"] || "",
-            model,
-            available_models: availableModels,
-            timeout: p.timeout || p["超时时间(秒)"] || 60,
-            default_size: String(p.default_size || p.default_resolution || "").trim(),
-            api_keys: normalizeTextAreaKeys(p.api_keys || p["API密钥"] || "")
+        state.permission_config = { ...(rawConfig.permission_config || {}), ...normalizePermissionConfig(perm) };
+        state.usage_config = { ...(rawConfig.usage_config || {}), ...normalizeUsageConfig(rawConfig.usage_config || {}) };
+        state.cache_config = { ...(rawConfig.cache_config || {}), ...normalizeCacheConfig(rawConfig.cache_config || {}) };
+        state.reply_config = { ...(rawConfig.reply_config || {}), ...normalizeReplyConfig(rawConfig.reply_config || {}) };
+        state.router_config = { ...(rawConfig.router_config || {}) };
+        state.router_config.chain_text2img = joinChain(splitChain(deepFind(route, ["chain_text2img"], "node_1"))) || "node_1";
+        state.router_config.chain_selfie = joinChain(splitChain(deepFind(route, ["chain_selfie"], "node_1"))) || "node_1";
+        state.router_config.chain_video = joinChain(splitChain(deepFind(route, ["chain_video"], "video_node_1"))) || "video_node_1";
+        state.route_backup_enabled = {
+            text2img: splitChain(state.router_config.chain_text2img).length > 1,
+            selfie: splitChain(state.router_config.chain_selfie).length > 1,
+            video: splitChain(state.router_config.chain_video).length > 1
         };
-    });
+        state.persona_config = { ...(rawConfig.persona_config || {}), ...normalizePersonaProfiles(pers) };
 
-    state.video_providers = (rawConfig.video_providers || []).map((p) => {
-        const availableModels = normalizeModelList(p.available_models?.length ? p.available_models : (p.model || p["模型名称"] || ""));
-        const model = p.model && !String(p.model).includes(",") ? p.model : (availableModels[0] || "");
-        return {
-            id: p.id || p["节点ID"] || "",
-            api_type: p.api_type || p["接口模式"] || "async_task",
-            base_url: p.base_url || p["接口地址 (需含/v1或/v2)"] || p["接口地址 (需含/v1)"] || "",
-            model,
-            available_models: availableModels,
-            timeout: p.timeout || p["超时时间(秒)"] || 300,
-            default_size: String(p.default_size || p.default_resolution || "").trim(),
-            api_keys: normalizeTextAreaKeys(p.api_keys || p["API密钥"] || "")
-        };
-    });
+        state.optimizer_config = { ...(rawConfig.optimizer_config || {}) };
+        state.optimizer_config.enable_optimizer = deepFind(opt, ["enable_optimizer"], true);
+        state.optimizer_config.use_astrbot_provider = deepFind(opt, ["use_astrbot_provider"], false);
+        state.optimizer_config.optimizer_style = deepFind(opt, ["optimizer_style"], "手机日常原生感");
+        state.optimizer_config.chain_optimizer = deepFind(opt, ["chain_optimizer"], "node_1");
+        state.optimizer_config.optimizer_model = deepFind(opt, ["optimizer_model"], "gpt-4o-mini");
+        state.optimizer_config.optimizer_timeout = parseFloat(deepFind(opt, ["optimizer_timeout"], 15)) || 15;
+        state.optimizer_config.max_batch_count = parseInt(deepFind(opt, ["max_batch_count"], 0), 10) || 0;
+        state.optimizer_config.optimizer_custom_prompt = deepFind(opt, ["optimizer_custom_prompt"]);
 
-    state.verbose_report = Boolean(rawConfig.verbose_report);
-    state.show_generation_time = Boolean(rawConfig.show_generation_time);
-    state.show_request_model = Boolean(rawConfig.show_request_model);
+        state.presets = (rawConfig.presets || []).map(parsePreset);
+        state.providers = (rawConfig.providers || []).map((p) => {
+            const availableModels = normalizeModelList(p.available_models?.length ? p.available_models : (p.model || p["模型名称"] || ""));
+            const model = p.model && !String(p.model).includes(",") ? p.model : (availableModels[0] || "");
+            return {
+                ...p,
+                id: p.id || p["节点ID"] || "",
+                api_type: p.api_type || p["接口模式"] || "openai_image",
+                base_url: p.base_url ?? p["接口地址 (需含/v1)"] ?? "",
+                model,
+                available_models: availableModels,
+                timeout: p.timeout || p["超时时间(秒)"] || 60,
+                default_size: String(p.default_size ?? p.default_resolution ?? "").trim(),
+                api_keys: normalizeTextAreaKeys(p.api_keys ?? p["API密钥"] ?? "")
+            };
+        });
+
+        state.video_providers = (rawConfig.video_providers || []).map((p) => {
+            const availableModels = normalizeModelList(p.available_models?.length ? p.available_models : (p.model || p["模型名称"] || ""));
+            const model = p.model && !String(p.model).includes(",") ? p.model : (availableModels[0] || "");
+            return {
+                ...p,
+                id: p.id || p["节点ID"] || "",
+                api_type: p.api_type || p["接口模式"] || "async_task",
+                base_url: p.base_url ?? p["接口地址 (需含/v1或/v2)"] ?? p["接口地址 (需含/v1)"] ?? "",
+                model,
+                available_models: availableModels,
+                timeout: p.timeout || p["超时时间(秒)"] || 300,
+                default_size: String(p.default_size ?? p.default_resolution ?? "").trim(),
+                api_keys: normalizeTextAreaKeys(p.api_keys ?? p["API密钥"] ?? "")
+            };
+        });
+
+        state.verbose_report = normalizeBool(rawConfig.verbose_report);
+        state.show_generation_time = normalizeBool(rawConfig.show_generation_time);
+        state.show_request_model = normalizeBool(rawConfig.show_request_model);
 
         bindBasicFields();
         renderSelectors();
@@ -1568,18 +1813,19 @@ async function init() {
         renderUsageStats();
         renderCacheStats();
         setupEventDelegation();
-        await Promise.all([loadUsageStats(false), loadCacheStats(false)]);
         updateMetrics();
         initialized = true;
-        savedSnapshot = JSON.stringify(buildPayload());
+        document.querySelector('[data-action="save-config"]').disabled = false;
         setDirty(false);
+        notifyRender(byId(activeTabId));
         content?.setAttribute("aria-busy", "false");
-        pageStatus?.querySelector("strong")?.replaceChildren("READY");
+        pageStatus?.querySelector("strong")?.replaceChildren(window.AstrBotPluginPage ? "已连接" : "本地预览");
         document.body.classList.remove("is-loading");
     } catch (error) {
         console.error(error);
         content?.setAttribute("aria-busy", "false");
-        pageStatus?.querySelector("strong")?.replaceChildren("ERROR");
+        pageStatus?.querySelector("strong")?.replaceChildren("连接失败");
+        byId("save-state").textContent = "配置未加载，不能保存";
         document.body.classList.remove("is-loading");
         showToast("配置页初始化失败，请刷新后重试", "error");
     }
@@ -1591,11 +1837,9 @@ document.addEventListener("keydown", (event) => {
         document.querySelector('[data-action="save-config"]')?.click();
     }
 });
-
-window.addEventListener("beforeunload", (event) => {
-    if (!dirtyState) return;
-    event.preventDefault();
-    event.returnValue = "";
+window.addEventListener("pagehide", releasePersonaPreviews);
+window.addEventListener("pageshow", (event) => {
+    if (event.persisted && activeTabId === "tab-persona") renderPersonaImages();
 });
 
 init();
