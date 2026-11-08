@@ -1,1 +1,11 @@
 *.py text eol=lf
+pages/**/*.tsx text eol=lf
+pages/**/*.ts text eol=lf
+pages/**/*.css text eol=lf
+pages/**/*.js text eol=lf
+pages/**/*.html text eol=lf
+pages/**/*.json text eol=lf
+pages/**/src/upstream/LICENSE text eol=lf
+pages/**/src/upstream/licenses/*.txt text eol=lf
+# Preserve the pinned upstream file's intentional trailing blank line.
+pages/**/src/upstream/hooks/usePreventBackgroundScroll.ts whitespace=-blank-at-eof

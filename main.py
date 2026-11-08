@@ -18,8 +18,9 @@ import socket
 import threading
 import time
 import uuid
+from dataclasses import replace
 from urllib.parse import parse_qs, urljoin, urlparse
-from typing import Any, AsyncGenerator, Dict, Iterable, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, Iterable, List, Optional, Tuple
 
 import aiohttp
 from quart import jsonify, request, send_file
@@ -57,14 +58,30 @@ from .constants import (
     MessageEmoji,
 )
 from .core.chain_manager import ChainManager, ChainRunResult
+from .core.image_options import is_gif_request, normalize_gif_options
 from .core.parser import CommandParser
 from .core.persona_manager import PersonaManager
 from .core.prompt_optimizer import PromptOptimizer
 from .core.video_manager import VideoManager
-from .models import PLUGIN_AUTHOR, PLUGIN_NAME, PLUGIN_VERSION, PluginConfig
-from .utils import handle_errors, save_image_bytes, split_data_url
+from .models import PLUGIN_AUTHOR, PLUGIN_NAME, PLUGIN_VERSION, PluginConfig, _cleanup_unused_persona_refs
+from .utils import (
+    guess_image_content_type,
+    handle_errors,
+    save_image_bytes,
+    sniff_image_content_type,
+    split_data_url,
+)
+
+try:
+    from astrbot.api.message_components import File
+except ImportError:
+    try:
+        from astrbot.api.event.components import File
+    except ImportError:
+        File = None
 
 PAGE_PREVIEW_IMAGE_BYTES = 80 * 1024 * 1024
+MAX_PAGE_IMAGE_TOKENS = 4096
 NATIVE_ACTIVE_PERSONA_FILE_PREFIX = "files/persona_config/persona_ref_image/"
 CACHE_DIR_NAMES = ("temp_images", "user_refs")
 PLUGIN_RESULT_ERROR_MAX_LENGTH = 240
@@ -175,8 +192,15 @@ class OmniDrawPlugin(Star):
         self._cache_leases: Dict[str, int] = {}
         self._cache_cleanup_task: Optional[asyncio.Task] = None
         self._page_image_tokens: Dict[str, str] = {}
+        self._page_image_lock = threading.RLock()
+        self._page_image_secret = uuid.uuid4().hex
+        try:
+            self._event_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._event_loop = None
         self._native_config = config if hasattr(config, "save_config") else None
         self._native_config_path = str(getattr(config, "config_path", "") or "")
+        self._native_config_stamp = self._file_stamp(self._native_config_path)
         self._native_config_mtime = self._get_mtime(self._native_config_path)
         self._native_config_signature = self._file_signature(self._native_config_path)
         self._persist_config_mtime = self._get_mtime(self.config_path)
@@ -185,12 +209,19 @@ class OmniDrawPlugin(Star):
         self._apply_runtime_config(self._load_initial_config(config or {}))
         self._persist_config()
         self._safe_update_context_config()
+        self._cleanup_persona_refs()
 
         self.context.register_web_api(
             f"/{PLUGIN_NAME}/get_config",
             self.get_config_handler,
             ["GET"],
             "获取万象画卷配置",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/get_page_config",
+            self.get_page_config_handler,
+            ["GET"],
+            "获取万象画卷轻量页面配置",
         )
         self.context.register_web_api(
             f"/{PLUGIN_NAME}/save_config",
@@ -249,6 +280,15 @@ class OmniDrawPlugin(Star):
                 return hashlib.sha256(file.read()).hexdigest()
         except OSError:
             return ""
+
+    def _file_stamp(self, path: str) -> Optional[Tuple[int, int, int, int]]:
+        if not path:
+            return None
+        try:
+            stat = os.stat(path)
+            return stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
+        except OSError:
+            return None
 
     def _load_json_file(self, path: str) -> Dict[str, Any]:
         if not path or not os.path.exists(path):
@@ -728,15 +768,29 @@ class OmniDrawPlugin(Star):
         return native_config
 
     def _apply_runtime_config(self, raw_config: Dict[str, Any]) -> None:
-        self.raw_config = self._clean_runtime_config(raw_config if isinstance(raw_config, dict) else {})
-        self.plugin_config = PluginConfig.from_dict(self.raw_config, self.data_dir)
+        previous = getattr(self, "plugin_config", None)
+        candidate = self._clean_runtime_config(raw_config if isinstance(raw_config, dict) else {})
+        config = PluginConfig.from_dict(candidate, self.data_dir, cleanup_persona_refs=False)
         for legacy_key in LEGACY_PERSONA_CONFIG_KEYS:
-            self.raw_config.pop(legacy_key, None)
-        self.persona_manager = PersonaManager(self.plugin_config)
-        self.video_manager = VideoManager(self.plugin_config)
-        self.prompt_optimizer = PromptOptimizer(self.plugin_config)
-        self._restart_cache_cleanup_task()
-        self._prune_cache_if_needed("config_reload")
+            candidate.pop(legacy_key, None)
+        managers = PersonaManager(config), VideoManager(config), PromptOptimizer(config)
+        self.raw_config = candidate
+        self.plugin_config = config
+        self.persona_manager, self.video_manager, self.prompt_optimizer = managers
+        schedule_fields = ("enable_scheduled_cleanup", "scheduled_cleanup_interval_hours")
+        size_fields = ("enable_size_limit_cleanup", "max_cache_size_mb")
+        if previous is None or any(getattr(previous, key) != getattr(config, key) for key in schedule_fields):
+            self._restart_cache_cleanup_task()
+        if previous is None or any(getattr(previous, key) != getattr(config, key) for key in size_fields):
+            self._prune_cache_if_needed("config_reload")
+
+    def _cleanup_persona_refs(self) -> None:
+        # Delete retired references only after the new configuration has committed.
+        try:
+            active_refs = [ref for profile in self.plugin_config.personas for ref in profile.ref_images]
+            _cleanup_unused_persona_refs(os.path.join(self.data_dir, "persona_refs"), active_refs)
+        except Exception as exc:
+            logger.warning(f"[OmniDraw] 清理未使用的人设参考图失败，已保留文件: {exc}")
 
     def _prepare_runtime_config(self, raw_config: Dict[str, Any]) -> Dict[str, Any]:
         candidate = self._clean_runtime_config(raw_config if isinstance(raw_config, dict) else {})
@@ -772,6 +826,7 @@ class OmniDrawPlugin(Star):
                 self._native_config.clear()
                 self._native_config.update(native_config)
                 self._native_config.save_config()
+                self._native_config_stamp = self._file_stamp(self._native_config_path)
                 self._native_config_mtime = self._get_mtime(self._native_config_path)
                 self._native_config_signature = self._file_signature(self._native_config_path)
                 return
@@ -793,13 +848,22 @@ class OmniDrawPlugin(Star):
     def _refresh_from_native_config_if_changed(self) -> None:
         if not self._native_config_path:
             return
+        stamp = self._file_stamp(self._native_config_path)
+        if stamp is not None and stamp == getattr(self, "_native_config_stamp", None):
+            return
         with self._config_lock:
+            stamp = self._file_stamp(self._native_config_path)
+            if stamp is not None and stamp == getattr(self, "_native_config_stamp", None):
+                return
             current_mtime = self._get_mtime(self._native_config_path)
             current_signature = self._file_signature(self._native_config_path)
             if current_signature and current_signature == self._native_config_signature:
+                self._native_config_stamp = stamp
+                self._native_config_mtime = current_mtime
                 return
             native_config = self._clean_runtime_config(self._load_json_file(self._native_config_path))
             if not native_config:
+                self._native_config_stamp = stamp
                 self._native_config_mtime = current_mtime
                 self._native_config_signature = current_signature
                 return
@@ -813,10 +877,12 @@ class OmniDrawPlugin(Star):
             persisted_candidate = False
             try:
                 candidate = self._prepare_runtime_config(native_config)
-                self.raw_config = candidate
-                self._persist_config()
-                persisted_candidate = True
-                self._apply_runtime_config(candidate)
+                if candidate != self.raw_config:
+                    self.raw_config = candidate
+                    self._persist_config()
+                    persisted_candidate = True
+                    self._apply_runtime_config(candidate)
+                self._native_config_stamp = stamp
                 self._native_config_mtime = current_mtime
                 self._native_config_signature = current_signature
                 if self._native_config is not None:
@@ -837,23 +903,36 @@ class OmniDrawPlugin(Star):
                     except Exception as rollback_exc:
                         logger.error(f"[OmniDraw] 原生配置热同步回滚持久化失败: {rollback_exc}", exc_info=True)
                 raise
+            self._cleanup_persona_refs()
+
+    def _read_page_config(self, compact: bool) -> Dict[str, Any]:
+        with self._config_lock:
+            self._refresh_from_native_config_if_changed()
+            return self._config_for_page(compact=compact)
 
     async def get_config_handler(self):
-        self._refresh_from_native_config_if_changed()
-        return jsonify(self._config_for_page())
+        self._event_loop = asyncio.get_running_loop()
+        config = await asyncio.to_thread(self._read_page_config, False)
+        return jsonify(config)
+
+    async def get_page_config_handler(self):
+        self._event_loop = asyncio.get_running_loop()
+        config = await asyncio.to_thread(self._read_page_config, True)
+        return jsonify(config)
 
     async def get_usage_stats_handler(self):
-        self._refresh_from_native_config_if_changed()
+        self._event_loop = asyncio.get_running_loop()
+        await asyncio.to_thread(self._refresh_from_native_config_if_changed)
         stats = await asyncio.to_thread(self._usage_stats_for_page)
         return jsonify({"success": True, "stats": stats})
 
     async def get_cache_stats_handler(self):
-        self._refresh_from_native_config_if_changed()
+        self._event_loop = asyncio.get_running_loop()
+        await asyncio.to_thread(self._refresh_from_native_config_if_changed)
         stats = await asyncio.to_thread(self._cache_stats_for_page)
         return jsonify({"success": True, "stats": stats})
 
-    def _config_for_page(self) -> Dict[str, Any]:
-        self._page_image_tokens.clear()
+    def _config_for_page(self, compact: bool = False) -> Dict[str, Any]:
         page_config = copy.deepcopy(self.raw_config)
         self._mask_config_api_keys(page_config)
         persona_config = page_config.get("persona_config")
@@ -868,25 +947,35 @@ class OmniDrawPlugin(Star):
                 raw_profile_images = profile.get("persona_ref_image", [])
                 if not isinstance(raw_profile_images, list):
                     raw_profile_images = [raw_profile_images] if raw_profile_images else []
-                profile["persona_ref_image"] = self._image_refs_for_page(raw_profile_images)
+                profile["persona_ref_image"] = self._image_refs_for_page(raw_profile_images, compact=compact)
 
         raw_images = persona_config.get("persona_ref_image", [])
         if not isinstance(raw_images, list):
             raw_images = [raw_images] if raw_images else []
-        persona_config["persona_ref_image"] = self._image_refs_for_page(raw_images)
+        persona_config["persona_ref_image"] = self._image_refs_for_page(raw_images, compact=compact)
         return page_config
 
-    def _image_refs_for_page(self, image_refs: Iterable[Any]) -> List[str]:
+    def _page_persona_refs(self) -> Dict[str, Any]:
+        persona = self.raw_config.get("persona_config", {})
+        return {
+            "profiles": [{
+                "id": profile.get("id", ""),
+                "persona_ref_image": self._image_refs_for_page(profile.get("persona_ref_image", []), compact=True),
+            } for profile in persona.get("profiles", []) if isinstance(profile, dict)],
+            "persona_ref_image": self._image_refs_for_page(persona.get("persona_ref_image", []), compact=True),
+        }
+
+    def _image_refs_for_page(self, image_refs: Iterable[Any], compact: bool = False) -> List[str]:
         refs = []
         for image_ref in image_refs:
             if not image_ref:
                 continue
-            page_ref = self._image_ref_for_page(image_ref)
+            page_ref = self._image_ref_for_page(image_ref, compact=compact)
             if page_ref:
                 refs.append(page_ref)
         return refs
 
-    def _image_ref_for_page(self, image_ref: str) -> str:
+    def _image_ref_for_page(self, image_ref: str, compact: bool = False) -> str:
         image_ref = str(image_ref)
         resolved_preview = self._resolve_page_image_ref(image_ref)
         if resolved_preview:
@@ -910,7 +999,7 @@ class OmniDrawPlugin(Star):
         if not self._is_safe_page_image_path(image_ref):
             return ""
         try:
-            if os.path.getsize(image_ref) > PAGE_PREVIEW_IMAGE_BYTES:
+            if compact or os.path.getsize(image_ref) > PAGE_PREVIEW_IMAGE_BYTES:
                 return self._local_image_preview_url(image_ref)
             mime_type = mimetypes.guess_type(image_ref)[0] or "image/png"
             with open(image_ref, "rb") as file:
@@ -928,8 +1017,12 @@ class OmniDrawPlugin(Star):
 
     def _local_image_preview_url(self, image_ref: str) -> str:
         abs_path = os.path.abspath(image_ref)
-        token = uuid.uuid4().hex
-        self._page_image_tokens[token] = abs_path
+        token = hashlib.sha256(f"{self._page_image_secret}\0{abs_path}".encode("utf-8")).hexdigest()
+        with self._page_image_lock:
+            self._page_image_tokens.pop(token, None)
+            self._page_image_tokens[token] = abs_path
+            while len(self._page_image_tokens) > MAX_PAGE_IMAGE_TOKENS:
+                self._page_image_tokens.pop(next(iter(self._page_image_tokens)))
         return f"/{PLUGIN_NAME}/get_image?token={token}"
 
     def _is_page_image_preview_ref(self, image_ref: str) -> bool:
@@ -949,7 +1042,8 @@ class OmniDrawPlugin(Star):
         token = self._extract_page_image_token(image_ref)
         if not token:
             return ""
-        image_path = self._page_image_tokens.get(token, "")
+        with self._page_image_lock:
+            image_path = self._page_image_tokens.get(token, "")
         return image_path if image_path and os.path.exists(image_path) else ""
 
     def _normalize_saved_page_images(self, config: Dict[str, Any]) -> None:
@@ -972,8 +1066,9 @@ class OmniDrawPlugin(Star):
                     continue
                 if self._is_page_image_preview_ref(ref_str):
                     resolved = self._resolve_page_image_ref(ref_str)
-                    if resolved:
-                        refs.append(resolved)
+                    if not resolved or not self._is_safe_page_image_path(resolved):
+                        raise ValueError("参考图预览已失效，请刷新配置页后重试；原配置未修改。")
+                    refs.append(resolved)
                     continue
                 refs.append(ref_str)
             return refs
@@ -987,9 +1082,17 @@ class OmniDrawPlugin(Star):
 
     async def get_image_handler(self):
         token = str(request.args.get("token", "")).strip()
-        image_path = self._page_image_tokens.get(token)
+        with self._page_image_lock:
+            image_path = self._page_image_tokens.get(token)
         if not image_path or not self._is_safe_page_image_path(image_path):
             return jsonify({"success": False, "message": "参考图预览已失效，请刷新配置页。"}), 404
+
+        if request.args.get("format") == "data_url":
+            # AstrBot's Page bridge transports JSON, not binary fetch responses.
+            data_url = await asyncio.to_thread(self._image_ref_for_page, image_path)
+            if not data_url.startswith("data:image/"):
+                return jsonify({"success": False, "message": "参考图无法预览。"}), 413
+            return jsonify({"success": True, "data_url": data_url})
 
         mime_type = mimetypes.guess_type(image_path)[0] or "image/png"
         return await send_file(image_path, mimetype=mime_type)
@@ -1019,6 +1122,9 @@ class OmniDrawPlugin(Star):
                 ),
                 event=None,
                 record_usage=False,
+                use_gif=self._plugin_bool(payload.get("use_gif"), default=False),
+                frame_count=payload.get("frame_count", 9),
+                frame_duration_ms=payload.get("frame_duration_ms", 200),
             )
             status_code = 200 if result.get("success") else 500
             return jsonify(result), status_code
@@ -1030,6 +1136,24 @@ class OmniDrawPlugin(Star):
                 "images": [],
             }), 500
 
+    async def _run_config_operation(self, operation: Callable[..., Any], *args: Any) -> Any:
+        self._event_loop = asyncio.get_running_loop()
+        save_task = asyncio.create_task(asyncio.to_thread(operation, *args))
+        try:
+            return await asyncio.shield(save_task)
+        except asyncio.CancelledError:
+            # A disconnected caller must not abandon a half-finished transaction.
+            while not save_task.done():
+                try:
+                    await asyncio.shield(save_task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not save_task.cancelled() and save_task.exception() is not None:
+                logger.error(f"[OmniDraw] 调用方取消后配置操作失败: {save_task.exception()}")
+            raise
+
     async def save_config_handler(self):
         content_length = getattr(request, "content_length", None)
         if content_length and content_length > MAX_CONFIG_REQUEST_BYTES:
@@ -1038,52 +1162,62 @@ class OmniDrawPlugin(Star):
         if not isinstance(new_config, dict):
             return jsonify({"success": False, "message": "配置格式错误：请求体必须是 JSON 对象。"}), 400
 
-        persisted_candidate = False
         try:
-            with self._config_lock:
-                previous_raw = copy.deepcopy(self.raw_config)
-                previous_runtime = (
-                    self.plugin_config,
-                    self.persona_manager,
-                    self.video_manager,
-                    self.prompt_optimizer,
-                )
+            result = await self._run_config_operation(self._save_page_config, new_config)
+        except Exception as exc:
+            logger.error(f"[OmniDraw] 配置保存失败: {exc}", exc_info=True)
+            return jsonify({
+                "success": False,
+                "message": f"配置保存失败: {self._safe_plugin_error_message(exc)}",
+            }), 400 if isinstance(exc, ValueError) else 500
+
+        logger.info(f"[OmniDraw] 配置已持久化并热重载: {self.config_path}")
+        return jsonify(result)
+
+    def _save_page_config(self, new_config: Dict[str, Any]) -> Dict[str, Any]:
+        with self._config_lock:
+            if getattr(self, "_native_config_path", ""):
+                self._refresh_from_native_config_if_changed()
+            previous_raw = copy.deepcopy(self.raw_config)
+            previous_runtime = (
+                self.plugin_config,
+                self.persona_manager,
+                self.video_manager,
+                self.prompt_optimizer,
+            )
+            persisted_candidate = False
+            try:
                 new_config = copy.deepcopy(new_config)
                 self._normalize_saved_page_images(new_config)
                 self._restore_masked_api_keys(new_config)
                 candidate = self._prepare_runtime_config(self._merge_config_payload(new_config))
-
+                if candidate == self.raw_config:
+                    return {"success": True, "message": "配置已保存，热重载生效。", "persona_refs": self._page_persona_refs()}
                 self.raw_config = candidate
                 self._persist_config()
                 persisted_candidate = True
                 self._apply_runtime_config(candidate)
                 self._safe_update_context_config()
-        except Exception as exc:
-            with self._config_lock:
-                if 'previous_raw' in locals():
-                    self.raw_config = previous_raw
-                    (
-                        self.plugin_config,
-                        self.persona_manager,
-                        self.video_manager,
-                        self.prompt_optimizer,
-                    ) = previous_runtime
-                    if persisted_candidate:
-                        try:
-                            self._persist_config()
-                        except Exception as rollback_exc:
-                            logger.error(f"[OmniDraw] 配置回滚持久化失败: {rollback_exc}", exc_info=True)
-            logger.error(f"[OmniDraw] 配置保存失败: {exc}", exc_info=True)
-            return jsonify({
-                "success": False,
-                "message": f"配置保存失败: {self._safe_plugin_error_message(exc)}",
-            }), 500
-
-        logger.info(f"[OmniDraw] 配置已持久化并热重载: {self.config_path}")
-        return jsonify({"success": True, "message": "配置已保存，热重载生效。"})
+            except Exception:
+                self.raw_config = previous_raw
+                (
+                    self.plugin_config,
+                    self.persona_manager,
+                    self.video_manager,
+                    self.prompt_optimizer,
+                ) = previous_runtime
+                if persisted_candidate:
+                    try:
+                        self._persist_config()
+                    except Exception as rollback_exc:
+                        logger.error(f"[OmniDraw] 配置回滚持久化失败: {rollback_exc}", exc_info=True)
+                raise
+            self._cleanup_persona_refs()
+            return {"success": True, "message": "配置已保存，热重载生效。", "persona_refs": self._page_persona_refs()}
 
     async def clear_cache_handler(self):
-        self._refresh_from_native_config_if_changed()
+        self._event_loop = asyncio.get_running_loop()
+        await asyncio.to_thread(self._refresh_from_native_config_if_changed)
         result = await asyncio.to_thread(lambda: self._clear_cache_images(reason="webui"))
         stats = await asyncio.to_thread(self._cache_stats_for_page)
         return jsonify({"success": True, "message": "缓存已清理。", "cleanup": result, "stats": stats})
@@ -1413,6 +1547,14 @@ class OmniDrawPlugin(Star):
         return max(1, configured_hours) * 3600
 
     def _restart_cache_cleanup_task(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        owner_loop = getattr(self, "_event_loop", None)
+        if owner_loop is not None and owner_loop is not loop and not owner_loop.is_closed():
+            owner_loop.call_soon_threadsafe(self._restart_cache_cleanup_task)
+            return
         current = getattr(self, "_cache_cleanup_task", None)
         try:
             current_task = asyncio.current_task()
@@ -1445,7 +1587,7 @@ class OmniDrawPlugin(Star):
                 await asyncio.sleep(self._cache_cleanup_interval_seconds())
                 if not getattr(self.plugin_config, "enable_scheduled_cleanup", False):
                     return
-                self._clear_cache_images(reason="scheduled")
+                await asyncio.to_thread(self._clear_cache_images, reason="scheduled")
         except asyncio.CancelledError:
             raise
 
@@ -2243,6 +2385,111 @@ class OmniDrawPlugin(Star):
             return Image.fromURL(image_url)
         return Image.fromFileSystem(os.path.abspath(image_url))
 
+    def _is_gif_result(self, result: Any) -> bool:
+        image_url = self._get_image_result_url(result)
+        return (
+            getattr(result, "output_format", "") == "gif"
+            or guess_image_content_type(image_url, fallback="") == "image/gif"
+        )
+
+    def _write_gif_file(self, path: str, image_bytes: bytes) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "xb") as image_file:
+            image_file.write(image_bytes)
+
+    async def _materialize_gif_result(
+        self, result: Any, session: Optional[aiohttp.ClientSession] = None,
+        leased_paths: Optional[List[str]] = None,
+    ) -> Any:
+        """Keep original GIF bytes in a bounded local file, including extensionless URLs."""
+        image_url = self._get_image_result_url(result)
+        if not image_url:
+            return result
+        if image_url.startswith("data:"):
+            if len(image_url) > (MAX_IMAGE_BYTES * 4 // 3) + 4096:
+                raise ValueError("GIF 超过 20MB 大小限制。")
+            image_bytes, _ = await asyncio.to_thread(split_data_url, image_url)
+        elif image_url.startswith(("http://", "https://")):
+            if session is None:
+                async with aiohttp.ClientSession() as download_session:
+                    return await self._materialize_gif_result(result, download_session, leased_paths)
+            image_bytes, _, _ = await self._download_remote_image(
+                session, image_url, {"User-Agent": "OmniDraw/3.4"},
+            )
+        else:
+            owned_leases = self._lease_cache_paths([image_url])
+            try:
+                path = self._validate_local_image_path(image_url, allowed_root=self.data_dir)
+
+                def read_header():
+                    with open(path, "rb") as image_file:
+                        return image_file.read(6)
+
+                if sniff_image_content_type(await asyncio.to_thread(read_header)) != "image/gif":
+                    raise ValueError("节点未返回真实 GIF，已停止发送，未降级为静态图片。")
+                if leased_paths is not None:
+                    leased_paths.extend(owned_leases)
+                    owned_leases = []
+                return result
+            finally:
+                self._release_cache_paths(owned_leases)
+        if not image_bytes or len(image_bytes) > MAX_IMAGE_BYTES:
+            raise ValueError("GIF 为空或超过 20MB 大小限制。")
+        if sniff_image_content_type(image_bytes) != "image/gif":
+            raise ValueError("节点未返回真实 GIF，已停止发送，未降级为静态图片。")
+        path = os.path.abspath(os.path.join(
+            self.data_dir, "temp_images", f"gif_{int(time.time() * 1000)}_0_{uuid.uuid4().hex[:8]}.gif",
+        ))
+        # Lease before the worker creates the file; a cancelled worker never acquires a late lease.
+        owned_leases = self._lease_cache_paths([path])
+        try:
+            await asyncio.to_thread(self._write_gif_file, path, image_bytes)
+            materialized = replace(result, image_url=path) if isinstance(result, ChainRunResult) else path
+            if leased_paths is not None:
+                leased_paths.extend(owned_leases)
+                owned_leases = []
+            else:
+                self._prune_cache_if_needed("temp_images", protected_paths=[path])
+            return materialized
+        finally:
+            self._release_cache_paths(owned_leases)
+
+    async def _send_gif_result(
+        self, event: AstrMessageEvent, result: Any,
+        elapsed_seconds: Optional[float] = None, include_metadata: bool = False,
+    ) -> None:
+        leased_paths = []
+        try:
+            result = await self._materialize_gif_result(result, leased_paths=leased_paths)
+            path = self._get_image_result_url(result)
+            components = self._build_image_success_components(result, elapsed_seconds, include_metadata)
+            try:
+                await event.send(event.chain_result(components))
+            except Exception:
+                if File is None:
+                    raise
+                # Retry delivery, never generation: some adapters reject animated images.
+                logger.warning("[OmniDraw] GIF 图片发送失败，尝试以原始 GIF 文件发送。")
+                await event.send(event.chain_result([File(name=os.path.basename(path), file=path)]))
+        finally:
+            self._release_cache_paths(leased_paths)
+
+    async def _command_image_delivery(
+        self, event: AstrMessageEvent, result: Any, elapsed_seconds: float,
+        gif_requested: bool = False,
+    ) -> Optional[Any]:
+        if gif_requested or self._is_gif_result(result):
+            leased_paths = []
+            try:
+                result = await self._materialize_gif_result(result, leased_paths=leased_paths)
+                self._prune_cache_if_needed("temp_images", protected_paths=leased_paths)
+                if callable(getattr(event, "send", None)):
+                    await self._send_gif_result(event, result, elapsed_seconds, include_metadata=True)
+                    return None
+            finally:
+                self._release_cache_paths(leased_paths)
+        return event.chain_result(self._build_image_success_components(result, elapsed_seconds))
+
     def _format_generation_elapsed(self, elapsed_seconds: Optional[float]) -> str:
         try:
             seconds = max(0.0, float(elapsed_seconds))
@@ -2298,22 +2545,57 @@ class OmniDrawPlugin(Star):
                 return provider
         return self.plugin_config.providers[0] if self.plugin_config.providers else None
 
-    def _set_chain_config(self, chain_key: str, provider_id: str) -> None:
-        self.plugin_config.chains[chain_key] = [provider_id]
-        if chain_key == "optimizer":
-            self.raw_config.setdefault("optimizer_config", {})["chain_optimizer"] = provider_id
-        else:
-            config_key = "chain_text2img" if chain_key == "text2img" else f"chain_{chain_key}"
-            self.raw_config.setdefault("router_config", {})[config_key] = provider_id
+    def _set_chain_config(self, chain_key: str, provider_id: str) -> bool:
+        with self._config_lock:
+            self._refresh_from_native_config_if_changed()
+            provider = (
+                self.plugin_config.get_video_provider(provider_id) if chain_key == "video"
+                else self.plugin_config.get_provider(provider_id)
+            )
+            if not provider:
+                return False
+            section = "optimizer_config" if chain_key == "optimizer" else "router_config"
+            self._save_page_config({section: {f"chain_{chain_key}": provider_id}})
+            return True
 
     def _set_provider_model(self, chain_key: str, provider_id: str, selected_model: str) -> None:
-        provider_key = "video_providers" if chain_key == "video" else "providers"
-        for provider in self.raw_config.get(provider_key, []):
-            if isinstance(provider, dict) and str(provider.get("id", provider.get("节点ID", ""))) == provider_id:
-                provider["model"] = selected_model
-                if selected_model not in provider.get("available_models", []):
-                    provider.setdefault("available_models", []).insert(0, selected_model)
-                return
+        with self._config_lock:
+            provider_key = "video_providers" if chain_key == "video" else "providers"
+            providers = copy.deepcopy(self.raw_config.get(provider_key, []))
+            for provider in providers:
+                if isinstance(provider, dict) and str(provider.get("id", provider.get("节点ID", ""))) == provider_id:
+                    provider["model"] = selected_model
+                    if selected_model not in provider.get("available_models", []):
+                        provider.setdefault("available_models", []).insert(0, selected_model)
+                    self._save_page_config({provider_key: providers})
+                    return
+
+    def _switch_model_config(self, chain_key: str, target: str, model_idx: str) -> str:
+        with self._config_lock:
+            self._refresh_from_native_config_if_changed()
+            provider = self._get_active_provider(chain_key)
+            if not provider:
+                return f"{MessageEmoji.WARNING} 当前 {target} 链路没有可用节点。"
+            models = provider.available_models
+            if not models:
+                return f"{MessageEmoji.WARNING} 当前节点 ({provider.id}) 未配置可选模型。"
+            if not model_idx:
+                msg = f"🎛️ 节点 {provider.id} 的可用模型:\n"
+                for index, model_name in enumerate(models):
+                    marker = "👉" if model_name == provider.model else "  "
+                    msg += f"{marker} [{index}] {model_name}\n"
+                return msg + f"\n回复 /切换模型 {target} [序号或名称] 进行选择"
+            selected_model = ""
+            try:
+                index = int(model_idx)
+                if 0 <= index < len(models):
+                    selected_model = models[index]
+            except ValueError:
+                selected_model = next((model_name for model_name in models if model_name == model_idx), "")
+            if not selected_model:
+                return f"{MessageEmoji.WARNING} 模型序号或名称无效。"
+            self._set_provider_model(chain_key, provider.id, selected_model)
+            return f"{MessageEmoji.SUCCESS} 已将 {target} 节点 ({provider.id}) 默认模型切换为: {selected_model}"
 
     def _find_persona_profile(self, selector: str) -> Optional[Any]:
         selector = str(selector or "").strip()
@@ -2338,10 +2620,14 @@ class OmniDrawPlugin(Star):
                 return persona
         return None
 
-    def _set_active_persona(self, persona_id: str) -> None:
-        persona_conf = self.raw_config.setdefault("persona_config", {})
-        persona_conf["active_persona_id"] = persona_id
-        self._apply_runtime_config(self.raw_config)
+    def _set_active_persona(self, selector: str) -> Optional[Tuple[str, int]]:
+        with self._config_lock:
+            self._refresh_from_native_config_if_changed()
+            persona = self._find_persona_profile(selector)
+            if not persona:
+                return None
+            self._save_page_config({"persona_config": {"active_persona_id": persona.id}})
+            return self.plugin_config.persona_name, len(self.plugin_config.persona_ref_images)
 
     def _parse_extra_params(self, extra_params: str) -> Dict[str, Any]:
         if not extra_params:
@@ -2353,6 +2639,7 @@ class OmniDrawPlugin(Star):
         if not isinstance(kwargs, dict):
             return {}
 
+        kwargs = normalize_gif_options(kwargs)
         sanitized = {}
         for raw_key, value in kwargs.items():
             key = str(raw_key or "").strip()
@@ -2363,6 +2650,22 @@ class OmniDrawPlugin(Star):
                 continue
             sanitized[key] = value
         return sanitized
+
+    def _image_request_options(
+        self, extra_params: str, aspect_ratio: str, size: str,
+        use_gif: bool = False, frame_count: int = 9, frame_duration_ms: int = 200,
+    ) -> Dict[str, Any]:
+        options = {}
+        if aspect_ratio:
+            options["aspect_ratio"] = aspect_ratio
+        if size:
+            options["size"] = size
+        _, extra = self.cmd_parser.parse(extra_params or "")
+        options.update(extra)
+        if self._plugin_bool(use_gif, default=False):
+            # Parse before sanitizing so GIF-incompatible reserved options cannot vanish silently.
+            options.update(output_format="gif", frame_count=frame_count, frame_duration_ms=frame_duration_ms)
+        return self._sanitize_generation_kwargs(options)
 
     def _format_reply_message(self, template: str, default: str, **values: Any) -> str:
         raw_template = str(template or "").strip() or default
@@ -2514,27 +2817,27 @@ class OmniDrawPlugin(Star):
 
     def _replace_presets(self, presets: Dict[str, str]) -> None:
         normalized = [f"{name}:{prompt}" for name, prompt in presets.items()]
-        with self._config_lock:
-            self.raw_config["presets"] = normalized
-            self._apply_runtime_config(self.raw_config)
-            self._persist_config()
-            self._safe_update_context_config()
+        self._save_page_config({"presets": normalized})
 
     def _upsert_preset(self, preset_name: str, preset_prompt: str) -> bool:
-        presets = dict(self._preset_items())
-        existed = preset_name in presets
-        presets[preset_name] = preset_prompt
-        self._replace_presets(presets)
-        return existed
+        with self._config_lock:
+            self._refresh_from_native_config_if_changed()
+            presets = dict(self._preset_items())
+            existed = preset_name in presets
+            presets[preset_name] = preset_prompt
+            self._replace_presets(presets)
+            return existed
 
     def _delete_preset(self, selector: str) -> str:
-        preset_name = self._find_preset_name(selector)
-        if not preset_name:
-            return ""
-        presets = dict(self._preset_items())
-        presets.pop(preset_name, None)
-        self._replace_presets(presets)
-        return preset_name
+        with self._config_lock:
+            self._refresh_from_native_config_if_changed()
+            preset_name = self._find_preset_name(selector)
+            if not preset_name:
+                return ""
+            presets = dict(self._preset_items())
+            presets.pop(preset_name, None)
+            self._replace_presets(presets)
+            return preset_name
 
     def _build_command_error_message(self, func_name: str, exc: Exception, error_kind: str = "exception") -> Optional[str]:
         func_name = str(func_name or "")
@@ -2546,8 +2849,8 @@ class OmniDrawPlugin(Star):
         )
         error_type = type(exc).__name__ if exc is not None else ""
 
-        if func_name in {"cmd_draw", "on_message_preset"}:
-            command = "画" if func_name == "cmd_draw" else "宏指令"
+        if func_name in {"cmd_draw", "cmd_gif", "on_message_preset"}:
+            command = {"cmd_draw": "画", "cmd_gif": "gif"}.get(func_name, "宏指令")
             return self._format_reply_message(
                 self.plugin_config.draw_error_message,
                 DEFAULT_DRAW_ERROR_MESSAGE,
@@ -2633,6 +2936,17 @@ class OmniDrawPlugin(Star):
             return False
         return default
 
+    def _unwrap_tool_event(self, event: Any) -> Any:
+        wrapped = getattr(getattr(event, "context", None), "event", None)
+        return wrapped if wrapped is not None else event
+
+    def _generation_failure_message(self, generation: Dict[str, Any]) -> str:
+        errors = [
+            self._safe_plugin_error_message(result)
+            for result in generation.get("results", []) if isinstance(result, Exception)
+        ]
+        return "所有绘图节点请求失败" + (f"：{'；'.join(errors[:3])}" if errors else "")
+
     def _plugin_generation_mode(self, mode: Any) -> str:
         mode_text = str(mode or "").strip().lower()
         if mode_text in {"selfie", "persona", "persona_selfie", "portrait", "自拍", "人设自拍"}:
@@ -2688,6 +3002,7 @@ class OmniDrawPlugin(Star):
             data_url = image_url
             try:
                 image_bytes, content_type = split_data_url(image_url)
+                content_type = sniff_image_content_type(image_bytes, content_type)
                 save_dir = os.path.join(self.data_dir, "temp_images")
                 file_path = save_image_bytes(image_bytes, save_dir, image_url, "plugin", index, content_type)
                 self._prune_cache_if_needed("temp_images", protected_paths=[file_path])
@@ -2696,10 +3011,14 @@ class OmniDrawPlugin(Star):
         elif image_url.startswith("http"):
             source_type = "url"
             url = image_url
-            content_type = mimetypes.guess_type(image_url)[0] or ""
+            content_type = guess_image_content_type(image_url, fallback="")
         else:
             file_path = os.path.abspath(image_url)
             content_type = mimetypes.guess_type(file_path)[0] or ""
+            if content_type == "image/gif":
+                self._validate_local_image_path(file_path, allowed_root=self.data_dir)
+                with open(file_path, "rb") as gif_file:
+                    data_url = "data:image/gif;base64," + base64.b64encode(gif_file.read(MAX_IMAGE_BYTES + 1)).decode("ascii")
 
         return {
             "index": index,
@@ -2709,6 +3028,7 @@ class OmniDrawPlugin(Star):
             "file_path": file_path,
             "data_url": data_url,
             "content_type": content_type,
+            "output_format": "gif" if content_type == "image/gif" else getattr(result, "output_format", ""),
             "provider_id": getattr(result, "provider_id", ""),
             "model": getattr(result, "model", ""),
             "elapsed_seconds": getattr(result, "elapsed_seconds", None),
@@ -2724,42 +3044,60 @@ class OmniDrawPlugin(Star):
         size: str = "",
         extra_params: str = "",
         refs: Any = None,
+        use_gif: bool = False,
+        frame_count: int = 9,
+        frame_duration_ms: int = 200,
     ) -> Dict[str, Any]:
-        async with aiohttp.ClientSession() as session:
-            raw_refs = (
-                self._as_plugin_image_refs(refs)
-                if refs is not None
-                else (
-                    self._get_event_images(event, include_at_avatars=True)
-                    if event is not None
-                    else []
+        request_options = self._image_request_options(
+            extra_params, aspect_ratio, size, use_gif, frame_count, frame_duration_ms,
+        )
+        gif_requested = is_gif_request(request_options)
+        leased_result_paths = []
+        try:
+            async with aiohttp.ClientSession() as session:
+                raw_refs = (
+                    self._as_plugin_image_refs(refs)
+                    if refs is not None
+                    else (
+                        self._get_event_images(event, include_at_avatars=True)
+                        if event is not None
+                        else []
+                    )
                 )
-            )
-            # [patched] 文本生图不锁定人物外貌。
-            # 参考图在这里是素材，可能是一只猫、一栋楼、一件衣服，不一定是人物；
-            # 无条件锁定会要求"发色/瞳色/服装/体型与参考图一致"，对非人物主体是错位的。
-            # 需要锁定人物的是 generate_selfie——那条路径的画面里必定是角色本人。
-            optimized_actions = await self.prompt_optimizer.optimize(prompt, count, session=session)
-            optimized_actions = self._normalize_plugin_prompts(optimized_actions, prompt, count)
-            safe_refs = await self._process_and_save_images(raw_refs, session=session)
-            leased_paths = self._lease_cache_paths(safe_refs)
+                # [patched] 文本生图不锁定人物外貌。
+                # 参考图在这里是素材，可能是一只猫、一栋楼、一件衣服，不一定是人物；
+                # 无条件锁定会要求"发色/瞳色/服装/体型与参考图一致"，对非人物主体是错位的。
+                # 需要锁定人物的是 generate_selfie——那条路径的画面里必定是角色本人。
+                # The still-image optimizer enforces a frozen moment, which would erase GIF motion.
+                optimized_actions = (
+                    [prompt] * count if gif_requested
+                    else await self.prompt_optimizer.optimize(prompt, count, session=session)
+                )
+                optimized_actions = self._normalize_plugin_prompts(optimized_actions, prompt, count)
+                safe_refs = await self._process_and_save_images(raw_refs, session=session)
+                leased_paths = self._lease_cache_paths(safe_refs)
 
-            kwargs = {"user_refs": safe_refs} if safe_refs else {}
-            if aspect_ratio:
-                kwargs["aspect_ratio"] = aspect_ratio
-            if size:
-                kwargs["size"] = size
-            kwargs.update(self._parse_extra_params(extra_params))
+                kwargs = {"user_refs": safe_refs} if safe_refs else {}
+                kwargs.update(request_options)
 
-            try:
-                chain_manager = ChainManager(self.plugin_config, session)
-                tasks = [
-                    chain_manager.run_chain_with_metadata("text2img", optimized_action, **kwargs)
-                    for optimized_action in optimized_actions
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-            finally:
-                self._release_cache_paths(leased_paths)
+                try:
+                    chain_manager = ChainManager(self.plugin_config, session)
+                    tasks = [
+                        chain_manager.run_chain_with_metadata("text2img", optimized_action, **kwargs)
+                        for optimized_action in optimized_actions
+                    ]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    if gif_requested:
+                        results = await asyncio.gather(
+                            *(self._materialize_gif_result(result, session, leased_result_paths) for result in results),
+                            return_exceptions=True,
+                        )
+                        self._prune_cache_if_needed("temp_images", protected_paths=leased_result_paths)
+                finally:
+                    self._release_cache_paths(leased_paths)
+        except BaseException:
+            self._release_cache_paths(leased_result_paths)
+            raise
 
         return {
             "prompts": optimized_actions,
@@ -2769,6 +3107,7 @@ class OmniDrawPlugin(Star):
             "safe_refs": safe_refs,
             "mode": "text2img",
             "chain": "text2img",
+            "leased_result_paths": leased_result_paths,
         }
 
     async def _run_selfie_generation(
@@ -2780,90 +3119,103 @@ class OmniDrawPlugin(Star):
         size: str = "",
         extra_params: str = "",
         refs: Any = None,
+        use_gif: bool = False,
+        frame_count: int = 9,
+        frame_duration_ms: int = 200,
     ) -> Dict[str, Any]:
-        async with aiohttp.ClientSession() as session:
-            fallback_action = action or "看着镜头微笑"
-            raw_refs = (
-                self._as_plugin_image_refs(refs)
-                if refs is not None
-                else (
-                    self._get_event_images(event, include_at_avatars=True)
-                    if event is not None
-                    else []
+        request_options = self._image_request_options(
+            extra_params, aspect_ratio, size, use_gif, frame_count, frame_duration_ms,
+        )
+        gif_requested = is_gif_request(request_options)
+        leased_result_paths = []
+        try:
+            async with aiohttp.ClientSession() as session:
+                fallback_action = action or "看着镜头微笑"
+                raw_refs = (
+                    self._as_plugin_image_refs(refs)
+                    if refs is not None
+                    else (
+                        self._get_event_images(event, include_at_avatars=True)
+                        if event is not None
+                        else []
+                    )
                 )
-            )
-            # [patched] 人设参考图与本次消息里的参考图合并，而不是互相替换
-            _persona_refs = list(self.plugin_config.persona_ref_images or [])
-            _extra_refs = list(raw_refs or [])
-            # 人设图在前、本次消息的图在后。两条来源都要一起截断：
-            # 只截合并分支的话，人设图本身超过上限时仍会在
-            # _process_and_save_images 里直接抛 ValueError，整次生图失败。
-            target_refs = (_persona_refs + _extra_refs)[:MAX_REFERENCE_IMAGES_PER_REQUEST]
-            # [patched] 有参考图时告知副脑，避免它另编人物长相
-            # [patched] 按"谁在持机"决定构图自由度：
-            #   明确让别人/他物持机 → 第三人称视角，放开全身；
-            #   其余（含"和朋友一起自拍"这类同框但自己举机）→ 自拍视角，受自拍物理限制。
-            _external_camera_hints = (
-                "帮我拍", "帮忙拍", "帮拍", "帮我照", "帮忙照",
-                "让他拍", "让她拍", "让人拍", "让别人拍", "让人帮", "找人拍",
-                "请人拍", "请他拍", "请她拍",
-                "路人帮", "路人拍",
-                "朋友帮", "朋友给", "朋友拍", "同学帮", "同学给", "同学拍",
-                "同伴帮", "同伴给", "同伴拍", "同事帮", "同事给", "同事拍",
-                "家人帮", "家人给", "家人拍",
-                "摄影师", "三脚架", "定时拍", "支架拍", "自拍杆架",
-            )
-            # 这里只做正向的"持机动作"匹配，不解析否定句。
-            # 例如"不要让朋友帮我拍"仍会命中"朋友帮"。中文否定叠加嵌套从句时
-            # 关键词无法正确切分，而误判的下场只是构图多了点自由度，不值得引入规则。
-            # 只收"持机动作"，不收"同框的人"（朋友/同伴/一起）——
-            # 否则"和朋友一起自拍"会被判成别人持机，反而放开成第三人视角。
-            _act_text = fallback_action or ""
-            # 只要有"别人/他物持机"的信号，就放开全身构图；否则一律按自拍处理。
-            _has_external_camera = any(h in _act_text for h in _external_camera_hints)
-            _is_self_shot = not _has_external_camera
-            optimized_actions = await self.prompt_optimizer.optimize(
-                fallback_action, count, session=session,
-                has_reference=bool(target_refs), selfie=_is_self_shot,
-                external_camera=_has_external_camera,
-            )
-            optimized_actions = self._normalize_plugin_prompts(optimized_actions, fallback_action, count)
-            safe_refs = await self._process_and_save_images(target_refs, session=session)
-            leased_paths = self._lease_cache_paths(safe_refs)
-            extra_param_kwargs = self._parse_extra_params(extra_params)
+                # [patched] 人设参考图与本次消息里的参考图合并，而不是互相替换
+                _persona_refs = list(self.plugin_config.persona_ref_images or [])
+                _extra_refs = list(raw_refs or [])
+                # 人设图在前、本次消息的图在后。两条来源都要一起截断：
+                # 只截合并分支的话，人设图本身超过上限时仍会在
+                # _process_and_save_images 里直接抛 ValueError，整次生图失败。
+                target_refs = (_persona_refs + _extra_refs)[:MAX_REFERENCE_IMAGES_PER_REQUEST]
+                # [patched] 有参考图时告知副脑，避免它另编人物长相
+                # [patched] 按"谁在持机"决定构图自由度：
+                #   明确让别人/他物持机 → 第三人称视角，放开全身；
+                #   其余（含"和朋友一起自拍"这类同框但自己举机）→ 自拍视角，受自拍物理限制。
+                _external_camera_hints = (
+                    "帮我拍", "帮忙拍", "帮拍", "帮我照", "帮忙照",
+                    "让他拍", "让她拍", "让人拍", "让别人拍", "让人帮", "找人拍",
+                    "请人拍", "请他拍", "请她拍",
+                    "路人帮", "路人拍",
+                    "朋友帮", "朋友给", "朋友拍", "同学帮", "同学给", "同学拍",
+                    "同伴帮", "同伴给", "同伴拍", "同事帮", "同事给", "同事拍",
+                    "家人帮", "家人给", "家人拍",
+                    "摄影师", "三脚架", "定时拍", "支架拍", "自拍杆架",
+                )
+                # 这里只做正向的"持机动作"匹配，不解析否定句。
+                # 例如"不要让朋友帮我拍"仍会命中"朋友帮"。中文否定叠加嵌套从句时
+                # 关键词无法正确切分，而误判的下场只是构图多了点自由度，不值得引入规则。
+                # 只收"持机动作"，不收"同框的人"（朋友/同伴/一起）——
+                # 否则"和朋友一起自拍"会被判成别人持机，反而放开成第三人视角。
+                _act_text = fallback_action or ""
+                # 只要有"别人/他物持机"的信号，就放开全身构图；否则一律按自拍处理。
+                _has_external_camera = any(h in _act_text for h in _external_camera_hints)
+                _is_self_shot = not _has_external_camera
+                optimized_actions = [fallback_action] * count if gif_requested else await self.prompt_optimizer.optimize(
+                    fallback_action, count, session=session,
+                    has_reference=bool(target_refs), selfie=_is_self_shot,
+                    external_camera=_has_external_camera,
+                )
+                optimized_actions = self._normalize_plugin_prompts(optimized_actions, fallback_action, count)
+                safe_refs = await self._process_and_save_images(target_refs, session=session)
+                leased_paths = self._lease_cache_paths(safe_refs)
 
-            try:
-                chain_to_use = "selfie" if self.plugin_config.chains.get("selfie") else "text2img"
-                chain_manager = ChainManager(self.plugin_config, session)
-                prompts = []
-                tasks = []
-                # safe_refs 是处理后的绝对路径。build_persona_prompt 会另外塞一个
-                # persona_ref（只带人设首图），而 target_refs 的第一段本来就是人设图，
-                # 首图已经在 user_refs 里了，留着 persona_ref 就是同一张图传两次。
-                # 这里按规范化后的路径确认它确实存在才删，处理失败的极端情况仍保留兜底。
-                _safe_ref_set = {os.path.abspath(str(ref)) for ref in safe_refs}
-                for optimized_action in optimized_actions:
-                    final_prompt, kwargs = self.persona_manager.build_persona_prompt(optimized_action)
-                    if safe_refs:
-                        kwargs["user_refs"] = safe_refs
-                        _persona_first = kwargs.get("persona_ref")
-                        if (
-                            _persona_first
-                            # URL 形态不参与本地路径比较（provider 侧自行处理）
-                            and not str(_persona_first).startswith(("http://", "https://"))
-                            and os.path.abspath(str(_persona_first)) in _safe_ref_set
-                        ):
-                            kwargs.pop("persona_ref", None)
-                    if aspect_ratio:
-                        kwargs["aspect_ratio"] = aspect_ratio
-                    if size:
-                        kwargs["size"] = size
-                    kwargs.update(extra_param_kwargs)
-                    prompts.append(final_prompt)
-                    tasks.append(chain_manager.run_chain_with_metadata(chain_to_use, final_prompt, **kwargs))
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-            finally:
-                self._release_cache_paths(leased_paths)
+                try:
+                    chain_to_use = "selfie" if self.plugin_config.chains.get("selfie") else "text2img"
+                    chain_manager = ChainManager(self.plugin_config, session)
+                    prompts = []
+                    tasks = []
+                    # safe_refs 是处理后的绝对路径。build_persona_prompt 会另外塞一个
+                    # persona_ref（只带人设首图），而 target_refs 的第一段本来就是人设图，
+                    # 首图已经在 user_refs 里了，留着 persona_ref 就是同一张图传两次。
+                    # 这里按规范化后的路径确认它确实存在才删，处理失败的极端情况仍保留兜底。
+                    _safe_ref_set = {os.path.abspath(str(ref)) for ref in safe_refs}
+                    for optimized_action in optimized_actions:
+                        final_prompt, kwargs = self.persona_manager.build_persona_prompt(optimized_action)
+                        if safe_refs:
+                            kwargs["user_refs"] = safe_refs
+                            _persona_first = kwargs.get("persona_ref")
+                            if (
+                                _persona_first
+                                # URL 形态不参与本地路径比较（provider 侧自行处理）
+                                and not str(_persona_first).startswith(("http://", "https://"))
+                                and os.path.abspath(str(_persona_first)) in _safe_ref_set
+                            ):
+                                kwargs.pop("persona_ref", None)
+                        kwargs.update(request_options)
+                        prompts.append(final_prompt)
+                        tasks.append(chain_manager.run_chain_with_metadata(chain_to_use, final_prompt, **kwargs))
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    if gif_requested:
+                        results = await asyncio.gather(
+                            *(self._materialize_gif_result(result, session, leased_result_paths) for result in results),
+                            return_exceptions=True,
+                        )
+                        self._prune_cache_if_needed("temp_images", protected_paths=leased_result_paths)
+                finally:
+                    self._release_cache_paths(leased_paths)
+        except BaseException:
+            self._release_cache_paths(leased_result_paths)
+            raise
 
         return {
             "prompts": prompts,
@@ -2873,6 +3225,7 @@ class OmniDrawPlugin(Star):
             "safe_refs": safe_refs,
             "mode": "selfie",
             "chain": chain_to_use,
+            "leased_result_paths": leased_result_paths,
         }
 
     def _plugin_generation_response(self, generation: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Any]]:
@@ -2924,6 +3277,9 @@ class OmniDrawPlugin(Star):
         event: Optional[AstrMessageEvent] = None,
         record_usage: bool = False,
         allow_local_refs: bool = False,
+        use_gif: bool = False,
+        frame_count: int = 9,
+        frame_duration_ms: int = 200,
     ) -> Dict[str, Any]:
         """Generate image(s) for another plugin and return serializable image data.
 
@@ -2939,6 +3295,7 @@ class OmniDrawPlugin(Star):
 
         count = self._normalize_count(count)
         reserved_count = 0
+        generation = {}
         if event is not None:
             permission_error = self._permission_denied_message(event)
             if permission_error:
@@ -2960,6 +3317,9 @@ class OmniDrawPlugin(Star):
                     size=size,
                     extra_params=extra_params,
                     refs=raw_refs,
+                    use_gif=use_gif,
+                    frame_count=frame_count,
+                    frame_duration_ms=frame_duration_ms,
                 )
             else:
                 generation = await self._run_text2img_generation(
@@ -2970,6 +3330,9 @@ class OmniDrawPlugin(Star):
                     size=size,
                     extra_params=extra_params,
                     refs=raw_refs,
+                    use_gif=use_gif,
+                    frame_count=frame_count,
+                    frame_duration_ms=frame_duration_ms,
                 )
 
             response, valid_results = self._plugin_generation_response(generation)
@@ -2992,6 +3355,9 @@ class OmniDrawPlugin(Star):
             if event is not None and record_usage and reserved_count:
                 self._release_image_quota(event, reserved_count)
             raise
+        finally:
+            if generation.get("leased_result_paths"):
+                self._release_cache_paths(generation["leased_result_paths"])
 
     async def _send_generated_images(
         self,
@@ -3004,9 +3370,12 @@ class OmniDrawPlugin(Star):
         for result in results:
             if not self._get_image_result_url(result):
                 continue
-            await event.send(event.chain_result(
-                self._build_image_success_components(result, elapsed_seconds, include_metadata=include_metadata)
-            ))
+            if self._is_gif_result(result):
+                await self._send_gif_result(event, result, elapsed_seconds, include_metadata)
+            else:
+                await event.send(event.chain_result(
+                    self._build_image_success_components(result, elapsed_seconds, include_metadata=include_metadata)
+                ))
             sent += 1
             await asyncio.sleep(0.5)
         return sent
@@ -3022,6 +3391,7 @@ class OmniDrawPlugin(Star):
         msg = (
             f"📖 万象画卷 v{PLUGIN_VERSION}\n"
             f"{cmd('画')} [提示词] [--参数 值]\n"
+            f"{cmd('gif')} [动作描述] [--frame_count 9 --frame_duration_ms 200]\n"
             f"{cmd('自拍')} [动作] [--参数 值]\n"
             f"{cmd('视频')} [提示词] [--参数 值]\n"
             f"{cmd('人设')}\n"
@@ -3034,6 +3404,8 @@ class OmniDrawPlugin(Star):
             f"{cmd('添加预设')} [预设名] [提示词]\n"
             f"{cmd('删除预设')} [预设名]\n"
             f"{cmd('万象帮助')}\n\n"
+            "GIF：使用 gpt-image-2.6-sunburst / flare 且开通 GIF 预览权限的 Images 节点。\n"
+            "帧数 2–16，帧间隔 20–2000ms，默认 size=auto；自拍可加 --output_format gif。\n\n"
         )
         if self.plugin_config.presets:
             msg += "✨ 预设:\n" + "\n".join([cmd(str(preset)) for preset in self.plugin_config.presets.keys()])
@@ -3095,7 +3467,7 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(f"{MessageEmoji.WARNING} 缺少提示词。\n用法: /添加预设 [预设名] [提示词]")
             return
 
-        existed = self._upsert_preset(preset_name, preset_prompt)
+        existed = await self._run_config_operation(self._upsert_preset, preset_name, preset_prompt)
         action = "已更新" if existed else "已添加"
         yield event.plain_result(f"{MessageEmoji.SUCCESS} {action}预设「{preset_name}」。")
 
@@ -3117,7 +3489,7 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(f"{MessageEmoji.WARNING} 缺少预设名。\n用法: /删除预设 [预设名]")
             return
 
-        deleted_name = self._delete_preset(selector)
+        deleted_name = await self._run_config_operation(self._delete_preset, selector)
         if not deleted_name:
             yield event.plain_result(f"{MessageEmoji.WARNING} 找不到预设: {selector}\n可发送 /查看预设 查看所有预设名。")
             return
@@ -3229,17 +3601,15 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(f"{MessageEmoji.WARNING} 缺少人设。用法: /切换人设 [序号/ID/名称]\n可先发送 /人设 查看列表。")
             return
 
-        persona = self._find_persona_profile(selector)
-        if not persona:
+        selected = await self._run_config_operation(self._set_active_persona, selector)
+        if not selected:
             yield event.plain_result(f"{MessageEmoji.WARNING} 找不到人设: {selector}\n可先发送 /人设 查看列表。")
             return
 
-        self._set_active_persona(persona.id)
-        self._persist_config()
-        self._safe_update_context_config()
+        persona_name, reference_count = selected
         yield event.plain_result(
-            f"{MessageEmoji.SUCCESS} 已切换至人设「{self.plugin_config.persona_name}」，"
-            f"自拍将使用该人设的 {len(self.plugin_config.persona_ref_images)} 张参考图。"
+            f"{MessageEmoji.SUCCESS} 已切换至人设「{persona_name}」，"
+            f"自拍将使用该人设的 {reference_count} 张参考图。"
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -3265,14 +3635,11 @@ class OmniDrawPlugin(Star):
             return
 
         chain_key = target_map[target]
-        provider = self.plugin_config.get_video_provider(node_id) if chain_key == "video" else self.plugin_config.get_provider(node_id)
-        if not provider:
+        changed = await self._run_config_operation(self._set_chain_config, chain_key, node_id)
+        if not changed:
             yield event.plain_result(f"{MessageEmoji.WARNING} 找不到节点 ID: {node_id}")
             return
 
-        self._set_chain_config(chain_key, node_id)
-        self._persist_config()
-        self._safe_update_context_config()
         yield event.plain_result(f"{MessageEmoji.SUCCESS} 已将 {target} 链路切换至节点: {node_id}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -3300,42 +3667,8 @@ class OmniDrawPlugin(Star):
             return
 
         chain_key = target_map[target]
-        provider = self._get_active_provider(chain_key)
-        if not provider:
-            yield event.plain_result(f"{MessageEmoji.WARNING} 当前 {target} 链路没有可用节点。")
-            return
-
-        models = provider.available_models
-        if not models:
-            yield event.plain_result(f"{MessageEmoji.WARNING} 当前节点 ({provider.id}) 未配置可选模型。")
-            return
-
-        if not model_idx:
-            msg = f"🎛️ 节点 {provider.id} 的可用模型:\n"
-            for index, model_name in enumerate(models):
-                marker = "👉" if model_name == provider.model else "  "
-                msg += f"{marker} [{index}] {model_name}\n"
-            msg += f"\n回复 /切换模型 {target} [序号或名称] 进行选择"
-            yield event.plain_result(msg)
-            return
-
-        selected_model = ""
-        try:
-            index = int(model_idx)
-            if 0 <= index < len(models):
-                selected_model = models[index]
-        except ValueError:
-            selected_model = next((model_name for model_name in models if model_name == model_idx), "")
-
-        if not selected_model:
-            yield event.plain_result(f"{MessageEmoji.WARNING} 模型序号或名称无效。")
-            return
-
-        provider.model = selected_model
-        self._set_provider_model(chain_key, provider.id, selected_model)
-        self._persist_config()
-        self._safe_update_context_config()
-        yield event.plain_result(f"{MessageEmoji.SUCCESS} 已将 {target} 节点 ({provider.id}) 默认模型切换为: {selected_model}")
+        message = await self._run_config_operation(self._switch_model_config, chain_key, target, model_idx)
+        yield event.plain_result(message)
 
     @filter.event_message_type(EventMessageType.ALL, priority=5)
     async def on_message_preset(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
@@ -3381,9 +3714,8 @@ class OmniDrawPlugin(Star):
                 safe_refs = await self._process_and_save_images(raw_refs, session=session)
                 base_prompt, kwargs = self.cmd_parser.parse(preset_prompt)
                 extra_prompt, extra_kwargs = self.cmd_parser.parse(extra_rules)
-                kwargs = self._sanitize_generation_kwargs(kwargs)
-                extra_kwargs = self._sanitize_generation_kwargs(extra_kwargs)
                 kwargs.update(extra_kwargs)
+                kwargs = self._sanitize_generation_kwargs(kwargs)
                 prompt = self._build_preset_generation_prompt(base_prompt, extra_prompt)
                 param_count = len(kwargs)
                 if safe_refs:
@@ -3413,8 +3745,12 @@ class OmniDrawPlugin(Star):
                     result = await chain_manager.run_chain_with_metadata("text2img", prompt, **kwargs)
                 finally:
                     self._release_cache_paths(leased_paths)
+            delivery = await self._command_image_delivery(
+                event, result, time.perf_counter() - started_at, is_gif_request(kwargs),
+            )
             self._complete_image_quota(event, reserved_count, 1)
-            yield event.chain_result(self._build_image_success_components(result, time.perf_counter() - started_at))
+            if delivery is not None:
+                yield delivery
             self._stop_event_if_possible(event)
         except asyncio.CancelledError:
             self._release_image_quota(event, reserved_count)
@@ -3443,6 +3779,36 @@ class OmniDrawPlugin(Star):
         p9: str = "",
         p10: str = "",
     ) -> AsyncGenerator[Any, None]:
+        fallback = " ".join(str(item) for item in [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10] if item).strip()
+        async for result in self._run_draw_command(event, "画", fallback):
+            yield result
+
+    @filter.command("gif")
+    @handle_errors
+    async def cmd_gif(
+        self,
+        event: AstrMessageEvent,
+        p1: str = "",
+        p2: str = "",
+        p3: str = "",
+        p4: str = "",
+        p5: str = "",
+        p6: str = "",
+        p7: str = "",
+        p8: str = "",
+        p9: str = "",
+        p10: str = "",
+    ) -> AsyncGenerator[Any, None]:
+        # A previously configured /gif macro keeps precedence and is not run twice.
+        if self._find_preset_name("gif"):
+            return
+        fallback = " ".join(str(item) for item in [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10] if item).strip()
+        async for result in self._run_draw_command(event, "gif", fallback, use_gif=True):
+            yield result
+
+    async def _run_draw_command(
+        self, event: AstrMessageEvent, command: str, fallback: str, use_gif: bool = False,
+    ) -> AsyncGenerator[Any, None]:
         permission_error = self._permission_denied_message(event)
         if permission_error:
             yield event.plain_result(permission_error)
@@ -3452,9 +3818,8 @@ class OmniDrawPlugin(Star):
             yield event.plain_result(quota_error)
             return
 
-        fallback = " ".join(str(item) for item in [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10] if item).strip()
-        message = self._extract_command_message(event, "画", fallback)
-        raw_refs = self._get_event_images(event, include_at_avatars=True, at_after_command="画")
+        message = self._extract_command_message(event, command, fallback)
+        raw_refs = self._get_event_images(event, include_at_avatars=True, at_after_command=command)
         if not message and not raw_refs:
             self._release_image_quota(event, reserved_count)
             yield event.plain_result(f"{MessageEmoji.WARNING} 请输入提示词或附带参考图。")
@@ -3465,9 +3830,14 @@ class OmniDrawPlugin(Star):
             async with aiohttp.ClientSession() as session:
                 safe_refs = await self._process_and_save_images(raw_refs, session=session)
                 prompt, kwargs = self.cmd_parser.parse(message)
+                if use_gif:
+                    kwargs["output_format"] = "gif"
                 kwargs = self._sanitize_generation_kwargs(kwargs)
                 if not prompt and safe_refs:
-                    prompt = "根据参考图生成一张自然、清晰、符合原图语义的图片。"
+                    prompt = (
+                        "根据参考图生成连贯的 GIF 动图，保持主体一致并呈现自然动作。"
+                        if is_gif_request(kwargs) else "根据参考图生成一张自然、清晰、符合原图语义的图片。"
+                    )
                 param_count = len(kwargs)
                 if safe_refs:
                     kwargs["user_refs"] = safe_refs
@@ -3476,7 +3846,7 @@ class OmniDrawPlugin(Star):
                 msg = self._format_pending_message(
                     self.plugin_config.draw_pending_message,
                     DEFAULT_DRAW_PENDING_MESSAGE,
-                    command="画",
+                    command=command,
                     prompt=prompt,
                     ref_count=len(safe_refs),
                     param_count=param_count,
@@ -3493,8 +3863,12 @@ class OmniDrawPlugin(Star):
                     result = await chain_manager.run_chain_with_metadata("text2img", prompt, **kwargs)
                 finally:
                     self._release_cache_paths(leased_paths)
+            delivery = await self._command_image_delivery(
+                event, result, time.perf_counter() - started_at, is_gif_request(kwargs),
+            )
             self._complete_image_quota(event, reserved_count, 1)
-            yield event.chain_result(self._build_image_success_components(result, time.perf_counter() - started_at))
+            if delivery is not None:
+                yield delivery
         except asyncio.CancelledError:
             self._release_image_quota(event, reserved_count)
             raise
@@ -3529,14 +3903,16 @@ class OmniDrawPlugin(Star):
 
         fallback = " ".join(str(item) for item in [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10] if item).strip()
         message = self._extract_command_message(event, "自拍", fallback)
-        user_input, kwargs = self.cmd_parser.parse(message)
-        kwargs = self._sanitize_generation_kwargs(kwargs)
-        user_input = user_input or "看着镜头微笑"
-
         try:
+            user_input, kwargs = self.cmd_parser.parse(message)
+            kwargs = self._sanitize_generation_kwargs(kwargs)
+            user_input = user_input or "看着镜头微笑"
             started_at = time.perf_counter()
             async with aiohttp.ClientSession() as session:
-                optimized_actions = await self.prompt_optimizer.optimize(user_input, count=1, session=session)
+                optimized_actions = (
+                    [user_input] if is_gif_request(kwargs)
+                    else await self.prompt_optimizer.optimize(user_input, count=1, session=session)
+                )
                 final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(
                     optimized_actions[0] if optimized_actions else user_input
                 )
@@ -3573,8 +3949,12 @@ class OmniDrawPlugin(Star):
                     result = await chain_manager.run_chain_with_metadata(chain_to_use, final_prompt, **extra_kwargs)
                 finally:
                     self._release_cache_paths(leased_paths)
+            delivery = await self._command_image_delivery(
+                event, result, time.perf_counter() - started_at, is_gif_request(kwargs),
+            )
             self._complete_image_quota(event, reserved_count, 1)
-            yield event.chain_result(self._build_image_success_components(result, time.perf_counter() - started_at))
+            if delivery is not None:
+                yield delivery
         except asyncio.CancelledError:
             self._release_image_quota(event, reserved_count)
             raise
@@ -3650,9 +4030,14 @@ class OmniDrawPlugin(Star):
         extra_params: str = "",
         return_result: bool = False,
         refs: str = "",
+        use_gif: bool = False,
+        frame_count: int = 9,
+        frame_duration_ms: int = 200,
     ) -> str:
         """
-        以此 AI 助理的固定人设拍摄自拍。
+        以此 AI 助理的固定人设拍摄自拍或生成角色 GIF 动图。
+        用户要求眨眼、挥手等动态自拍或 GIF 时自主设 use_gif=true，并在 action 描述连续动作。
+        GIF 需要已配置且有 GIF 预览权限的 gpt-image-2.6-sunburst/flare Images 节点；不可用时报告原因，不伪装静态图。
         Args:
             action (string): 动作、姿态、服装、场景或画面描述。
             count (int): 需要生成的图片数量。默认为 1。
@@ -3661,12 +4046,19 @@ class OmniDrawPlugin(Star):
             extra_params (string): 附加模型参数透传，格式为 --key value，可同时传多个。
             return_result (bool): 仅供其他插件显式调用时使用。为 true 时不自动下发图片，而是返回 JSON 图片结果。
             refs (string): 仅在 return_result 为 true 时使用。自拍参考图 URL、本地路径或 data URL；多个参考图可用换行分隔，也可传 JSON 数组字符串。
+            use_gif (bool): 是否生成原生 GIF，默认 false 保持静态自拍。true 时绕过静态副脑，size 建议留空或 auto，aspect_ratio 留空。
+            frame_count (int): use_gif=true 时的帧数，2 至 16，默认 9；count 是 GIF 文件数量而非帧数。
+            frame_duration_ms (int): use_gif=true 时每帧间隔毫秒，20 至 2000，默认 200。模型按 10ms 取整。
         """
+        event = self._unwrap_tool_event(event)
         permission_error = self._permission_denied_message(event)
         if permission_error:
+            if self._plugin_bool(return_result, default=False):
+                return json.dumps({"success": False, "message": permission_error, "images": [], "mode": "selfie"}, ensure_ascii=False)
             return permission_error
 
         reserved_count = 0
+        generation = {}
         try:
             if self._plugin_bool(return_result, default=False):
                 explicit_refs = bool(str(refs or "").strip())
@@ -3681,6 +4073,9 @@ class OmniDrawPlugin(Star):
                     event=event,
                     record_usage=True,
                     allow_local_refs=not explicit_refs,
+                    use_gif=use_gif,
+                    frame_count=frame_count,
+                    frame_duration_ms=frame_duration_ms,
                 )
                 return json.dumps(result, ensure_ascii=False)
             count = self._normalize_count(count)
@@ -3694,10 +4089,13 @@ class OmniDrawPlugin(Star):
                 aspect_ratio=aspect_ratio,
                 size=size,
                 extra_params=extra_params,
+                use_gif=use_gif,
+                frame_count=frame_count,
+                frame_duration_ms=frame_duration_ms,
             )
             valid_results = [result for result in generation["results"] if self._get_image_result_url(result)]
             if not valid_results:
-                raise RuntimeError("所有绘图节点请求失败")
+                raise RuntimeError(self._generation_failure_message(generation))
             sent = await self._send_generated_images(event, valid_results)
             self._complete_image_quota(event, reserved_count, sent)
             return f"系统提示：已成功生成并下发了 {sent} 张图。"
@@ -3715,6 +4113,9 @@ class OmniDrawPlugin(Star):
                     "mode": "selfie",
                 }, ensure_ascii=False)
             return f"系统提示：画图失败 ({self._safe_plugin_error_message(exc)})。"
+        finally:
+            if generation.get("leased_result_paths"):
+                self._release_cache_paths(generation["leased_result_paths"])
 
     @llm_tool(name="generate_image")
     async def tool_generate_image(
@@ -3727,9 +4128,15 @@ class OmniDrawPlugin(Star):
         extra_params: str = "",
         return_result: bool = False,
         refs: str = "",
+        use_gif: bool = False,
+        frame_count: int = 9,
+        frame_duration_ms: int = 200,
     ) -> str:
         """
-        AI 画图工具。当用户提出明确的画面要求你画出来时调用此工具。
+        AI 画图 / GIF 动图工具。当用户要求绘图、改图、动态表情包或 GIF 时调用此工具。
+        用户要 GIF、循环动画或动态表情时自主设 use_gif=true，在 prompt 描述连续动作及循环，不要改用视频工具。
+        普通图片保持 use_gif=false。GIF 需要有 GIF 预览权限的 gpt-image-2.6-sunburst/flare Images 节点。
+        若 GIF 节点不可用，解释失败原因，不自动改成静态图，也不要反复重新生成。
         Args:
             prompt (string): 图片提示词，描述主体、风格、场景、构图和细节。
             count (int): 图片数量。默认为 1。
@@ -3738,12 +4145,19 @@ class OmniDrawPlugin(Star):
             extra_params (string): 其他模型参数透传，格式为 --key value，可同时传多个。
             return_result (bool): 仅供其他插件显式调用时使用。为 true 时不自动下发图片，而是返回 JSON 图片结果。
             refs (string): 仅在 return_result 为 true 时使用。参考图 URL、本地路径或 data URL；多个参考图可用换行分隔，也可传 JSON 数组字符串。
+            use_gif (bool): 是否生成原生 GIF，默认 false。true 时绕过静态副脑，size 建议留空或 auto，aspect_ratio 留空。
+            frame_count (int): use_gif=true 时的帧数，2 至 16，默认 9；count 是 GIF 文件数量而非帧数。
+            frame_duration_ms (int): use_gif=true 时每帧间隔毫秒，20 至 2000，默认 200。模型按 10ms 取整。
         """
+        event = self._unwrap_tool_event(event)
         permission_error = self._permission_denied_message(event)
         if permission_error:
+            if self._plugin_bool(return_result, default=False):
+                return json.dumps({"success": False, "message": permission_error, "images": [], "mode": "text2img"}, ensure_ascii=False)
             return permission_error
 
         reserved_count = 0
+        generation = {}
         try:
             if self._plugin_bool(return_result, default=False):
                 explicit_refs = bool(str(refs or "").strip())
@@ -3757,6 +4171,9 @@ class OmniDrawPlugin(Star):
                     event=event,
                     record_usage=True,
                     allow_local_refs=not explicit_refs,
+                    use_gif=use_gif,
+                    frame_count=frame_count,
+                    frame_duration_ms=frame_duration_ms,
                 )
                 return json.dumps(result, ensure_ascii=False)
             count = self._normalize_count(count)
@@ -3770,10 +4187,13 @@ class OmniDrawPlugin(Star):
                 aspect_ratio=aspect_ratio,
                 size=size,
                 extra_params=extra_params,
+                use_gif=use_gif,
+                frame_count=frame_count,
+                frame_duration_ms=frame_duration_ms,
             )
             valid_results = [result for result in generation["results"] if self._get_image_result_url(result)]
             if not valid_results:
-                raise RuntimeError("所有绘图节点请求失败")
+                raise RuntimeError(self._generation_failure_message(generation))
             sent = await self._send_generated_images(event, valid_results)
             self._complete_image_quota(event, reserved_count, sent)
             return f"系统提示：已成功下发 {sent} 张图。"
@@ -3791,6 +4211,9 @@ class OmniDrawPlugin(Star):
                     "mode": "text2img",
                 }, ensure_ascii=False)
             return f"系统提示：画图失败 ({self._safe_plugin_error_message(exc)})。"
+        finally:
+            if generation.get("leased_result_paths"):
+                self._release_cache_paths(generation["leased_result_paths"])
 
     @llm_tool(name="generate_video")
     async def tool_generate_video(

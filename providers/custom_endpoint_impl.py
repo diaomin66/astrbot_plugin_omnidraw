@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 
 import aiohttp
 from astrbot.api import logger
+from ..constants import MAX_IMAGE_BYTES
+from ..core.image_options import is_gif_request
 
 from .base import (
     BaseProvider,
@@ -18,6 +20,7 @@ from .base import (
     summarize_response_text_for_log,
     summarize_text_for_log,
     summarize_url_for_log,
+    validate_gif_result,
 )
 
 
@@ -99,7 +102,7 @@ class CustomEndpointProvider(BaseProvider):
         logger.info(f"📤 [自定义通道] 请求完整路径: {summarize_url_for_log(endpoint)}")
         logger.info(f"📤 [自定义通道] 请求体摘要: {summarize_payload_json_for_log(payload)}")
         async with self.session.post(endpoint, json=payload, headers=headers, timeout=timeout_obj) as response:
-            return await self._parse_response(response, endpoint)
+            return await self._parse_response(response, endpoint, gif_requested=is_gif_request(payload))
 
     async def _post_edits_form(
         self,
@@ -127,9 +130,11 @@ class CustomEndpointProvider(BaseProvider):
         timeout_obj = aiohttp.ClientTimeout(total=self.config.timeout)
         logger.info(f"📤 [自定义通道] 以 multipart 请求完整路径: {summarize_url_for_log(endpoint)}")
         async with self.session.post(endpoint, data=data, headers=headers, timeout=timeout_obj) as response:
-            return await self._parse_response(response, endpoint)
+            return await self._parse_response(response, endpoint, gif_requested=is_gif_request(api_kwargs))
 
-    async def _parse_response(self, response: aiohttp.ClientResponse, endpoint: str) -> str:
+    async def _parse_response(
+        self, response: aiohttp.ClientResponse, endpoint: str, *, gif_requested: bool = False,
+    ) -> str:
         text = await read_response_text_limited(response)
         if response.status >= 400:
             logger.error("💥 自定义通道 API 返回错误摘要: " + summarize_response_text_for_log(text, max_string_length=500))
@@ -140,9 +145,11 @@ class CustomEndpointProvider(BaseProvider):
         except Exception:
             payload = text
 
-        image_url = extract_image_url_from_response(payload, endpoint)
+        image_url = extract_image_url_from_response(
+            payload, endpoint, max_inline_bytes=MAX_IMAGE_BYTES if gif_requested else None,
+        )
         if image_url:
-            return image_url
+            return validate_gif_result(image_url) if gif_requested else image_url
         if isinstance(payload, (dict, list, tuple)):
             payload_summary = summarize_payload_json_for_log(payload, max_string_length=500)
         else:
@@ -168,6 +175,9 @@ class CustomEndpointProvider(BaseProvider):
             raise ValueError("自定义 /images/edits 完整路径需要至少一张参考图。")
         if endpoint_path.endswith("/images/edits"):
             return await self._post_edits_form(endpoint, headers, prompt, ref_images, api_kwargs)
+
+        if ref_images and is_gif_request(api_kwargs):
+            raise ValueError("参考图生成 GIF 需要 /images/edits；请为自定义节点填写该完整路径。")
 
         if ref_images and len(ref_images) > 3 and not endpoint_path.endswith(("/chat/completions", "/responses")):
             raise ValueError("自定义图片 JSON 接口最多支持 3 张参考图。")

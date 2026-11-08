@@ -13,7 +13,9 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterable, Optional, List, Tuple
 from urllib.parse import parse_qsl, urljoin, urlparse, urlunparse
 from astrbot.api import logger
+from ..constants import MAX_IMAGE_BYTES
 from ..models import ProviderConfig
+from ..core.image_options import is_gif_request, normalize_gif_options, provider_supports_gif
 
 _KEY_ROTATION_LOCK = threading.Lock()
 _KEY_ROTATION_INDEX: Dict[str, int] = {}
@@ -157,10 +159,12 @@ def build_image_generations_endpoint(base_url: str) -> str:
     return _append_url_path(base_url, "images/generations")
 
 
-def build_image_edits_endpoint(base_url: str) -> str:
+def build_image_edits_endpoint(base_url: str, *, force_edits: bool = False) -> str:
     base_url = normalize_base_url(base_url)
     if not base_url:
         return ""
+    if force_edits:
+        base_url = _replace_endpoint_path(base_url, "/images/generations", "/images/edits")
     if _has_endpoint_path(base_url, ["/images/generations", "/images/edits"]):
         return base_url
     return _append_url_path(base_url, "images/edits")
@@ -510,18 +514,23 @@ def summarize_response_text_for_log(value: str, max_string_length: int = 500) ->
         return summarize_text_for_log(value, max_string_length=max_string_length)
 
 
-def extract_image_url_from_response(payload: Any, base_url: str) -> str:
+def extract_image_url_from_response(
+    payload: Any, base_url: str, *, max_inline_bytes: Optional[int] = None,
+) -> str:
     """Extract an image URL or data URL from common image/chat/responses shapes."""
+
+    def check_inline_size(value: str) -> None:
+        if max_inline_bytes is not None and len(re.sub(r"\s+", "", value)) > 4 * ((max_inline_bytes + 2) // 3):
+            raise ValueError(f"返回图片超过 {max_inline_bytes // 1024 // 1024} MiB 上限，请减少帧数或尺寸。")
 
     def likely_base64(value: str) -> bool:
         text = value.strip()
-        if len(text) < 80:
-            return False
         if not re.fullmatch(r"[A-Za-z0-9+/=\s]+", text):
             return False
+        check_inline_size(text)
         try:
-            base64.b64decode(text, validate=False)
-            return True
+            decoded = base64.b64decode(text, validate=False)
+            return len(text) >= 80 or bool(_image_kind(decoded[:32]))
         except Exception:
             return False
 
@@ -564,7 +573,10 @@ def extract_image_url_from_response(payload: Any, base_url: str) -> str:
             if extracted:
                 return extracted
             if assume_base64 and likely_base64(text):
-                return "data:image/png;base64," + re.sub(r"\s+", "", text)
+                compact = re.sub(r"\s+", "", text)
+                header = base64.b64decode(compact[:48], validate=False)
+                kind = _image_kind(header) or "png"
+                return f"data:image/{kind};base64," + compact
             return ""
         return walk(value)
 
@@ -583,6 +595,7 @@ def extract_image_url_from_response(payload: Any, base_url: str) -> str:
         if not mime_type.split(";", 1)[0].lower().startswith("image/"):
             return ""
         compact_data = re.sub(r"\s+", "", data)
+        check_inline_size(compact_data)
         try:
             base64.b64decode(compact_data, validate=True)
         except Exception:
@@ -697,6 +710,29 @@ def extract_image_url_from_response(payload: Any, base_url: str) -> str:
     return walk(payload)
 
 
+def validate_gif_result(image_ref: str) -> str:
+    """Reject static inline results before fallback ends; URLs are checked on download."""
+    if not image_ref.lower().startswith("data:"):
+        if urlparse(image_ref).scheme.lower() not in {"http", "https"}:
+            raise ValueError("GIF 返回地址必须是 HTTP(S) URL 或 Base64 图片。")
+        return image_ref
+    header, separator, encoded = image_ref.partition(",")
+    if not separator or ";base64" not in header.lower():
+        raise ValueError("GIF 返回数据不是有效的 Base64 图片。")
+    compact = re.sub(r"\s+", "", encoded)
+    if len(compact) > 4 * ((MAX_IMAGE_BYTES + 2) // 3):
+        raise ValueError("GIF 返回文件超过 20 MiB 上限，请减少帧数或尺寸。")
+    try:
+        payload = base64.b64decode(compact, validate=True)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise ValueError("GIF 返回数据的 Base64 编码无效。") from exc
+    if len(payload) > MAX_IMAGE_BYTES:
+        raise ValueError("GIF 返回文件超过 20 MiB 上限，请减少帧数或尺寸。")
+    if _image_kind(payload[:32]) != "gif":
+        raise ValueError("节点未返回 GIF 数据，拒绝将静态图片当作动图发送。")
+    return "data:image/gif;base64," + compact
+
+
 class BaseProvider(ABC):
     def __init__(self, config: ProviderConfig, session: aiohttp.ClientSession):
         self.config = config
@@ -708,6 +744,10 @@ class BaseProvider(ABC):
         return next_api_key(self.config.id, self._api_keys, scope=scope)
 
     def filter_api_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        if is_gif_request(kwargs):
+            if not provider_supports_gif(self.config):
+                raise ValueError("GIF 需要 gpt-image-2.6-sunburst/flare 的 Images API 节点。")
+            kwargs = normalize_gif_options(kwargs)
         return filter_provider_api_kwargs(kwargs, self.config.id)
 
     async def read_reference_image(self, image_path_or_url: str) -> Tuple[bytes, str]:

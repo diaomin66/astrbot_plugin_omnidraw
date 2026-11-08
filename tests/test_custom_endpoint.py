@@ -692,8 +692,9 @@ class PluginImageReturnTest(unittest.IsolatedAsyncioTestCase):
         plugin = object.__new__(OmniDrawPlugin)
         plugin.data_dir = str(PLUGIN_DIR / ".pytest_cache" / "plugin_return")
         plugin.plugin_config = types.SimpleNamespace(max_batch_count=4)
+        plugin.cmd_parser = main_module.CommandParser()
         plugin.prompt_optimizer = types.SimpleNamespace(
-            optimize=lambda prompt, count, session=None: self._optimize(prompt, count)
+            optimize=lambda prompt, count, session=None, **kwargs: self._optimize(prompt, count)
         )
         plugin.persona_manager = types.SimpleNamespace(
             build_persona_prompt=lambda action: (f"persona base, {action}", {"persona_ref": "persona-default.png"})
@@ -711,7 +712,7 @@ class PluginImageReturnTest(unittest.IsolatedAsyncioTestCase):
         plugin._reserve_image_quota = lambda event, count=1: ("", 0)
         plugin._complete_image_quota = lambda event, reserved, count: setattr(plugin, "_recorded_count", count)
         plugin._release_image_quota = lambda event, reserved: None
-        plugin._get_event_images = lambda event: []
+        plugin._get_event_images = lambda event, **kwargs: []
         return plugin
 
     async def _optimize(self, prompt, count):
@@ -772,6 +773,9 @@ class PluginImageReturnTest(unittest.IsolatedAsyncioTestCase):
         plugin = self._plugin()
         plugin.plugin_config.persona_ref_images = ["persona-ref.png"]
         plugin.plugin_config.chains = {"selfie": ["selfie_node_1"]}
+        plugin.persona_manager.build_persona_prompt = lambda action: (
+            f"persona base, {action}", {"persona_ref": "safe:persona-ref.png"}
+        )
         calls = []
         original_client_session = main_module.aiohttp.ClientSession
         original_chain_manager = main_module.ChainManager
@@ -1180,6 +1184,8 @@ class FastPresetListTest(unittest.TestCase):
 
     def test_upsert_and_delete_preset_update_runtime_presets(self):
         plugin = self._plugin({"旧预设": "old prompt"})
+        plugin._config_lock = threading.RLock()
+        plugin._native_config_path = ""
 
         def replace_presets(presets):
             plugin.plugin_config = types.SimpleNamespace(presets=dict(presets))
