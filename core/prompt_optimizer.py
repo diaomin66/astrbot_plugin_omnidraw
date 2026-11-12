@@ -163,6 +163,11 @@ class PromptOptimizer:
                 "a full body from head to shoes, so never write a full-body framing. "
                 "Do NOT show the phone from behind or from a third-person angle, "
                 "and never imply that someone else is holding the camera. "
+                "Draw exactly two arms and two hands, both belonging to the character: "
+                "no hand or forearm reaching toward the lens, no arm entering from outside the frame, "
+                "no third arm, and no other person's limb anywhere in the image. "
+                "Keep both visible arms clear of her own torso, skirt and hair so nothing intersects, "
+                "clips through, or merges into the clothing. "
                 "If the user asked for a full-body shot, keep it a normal selfie framing instead "
                 "and do not invent a photographer."
             )
