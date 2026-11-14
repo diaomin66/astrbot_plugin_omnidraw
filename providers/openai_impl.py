@@ -11,6 +11,7 @@ from .base import (
     BaseProvider,
     build_image_edits_endpoint,
     build_image_generations_endpoint,
+    convert_openai_image_size_kwargs,
     extract_error_message,
     extract_image_url_from_response,
     read_response_text_limited,
@@ -31,6 +32,7 @@ class OpenAIProvider(BaseProvider):
         logger.info(f"📝 [标准通道] 最终发送给 API 的核心提示词:\n{prompt}")
 
         api_kwargs = self.filter_api_kwargs(kwargs)
+        api_kwargs = convert_openai_image_size_kwargs(api_kwargs, self.config.id)
         gif_requested = is_gif_request(api_kwargs)
 
         if ref_images:
