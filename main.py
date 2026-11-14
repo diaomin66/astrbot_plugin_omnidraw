@@ -4041,7 +4041,7 @@ class OmniDrawPlugin(Star):
         Args:
             action (string): 动作、姿态、服装、场景或画面描述。
             count (int): 需要生成的图片数量。默认为 1。
-            aspect_ratio (string): 宽高比例，例如 1:1、3:4、9:16、16:9。
+            aspect_ratio (string): [已弃用] 宽高比例，例如 1:1、3:4、9:16、16:9；OpenAI 标准通道会按比例换算为 size，请优先直接传 size。
             size (string): 分辨率或尺寸参数，例如 1024x1024。
             extra_params (string): 附加模型参数透传，格式为 --key value，可同时传多个。
             return_result (bool): 仅供其他插件显式调用时使用。为 true 时不自动下发图片，而是返回 JSON 图片结果。
@@ -4140,7 +4140,7 @@ class OmniDrawPlugin(Star):
         Args:
             prompt (string): 图片提示词，描述主体、风格、场景、构图和细节。
             count (int): 图片数量。默认为 1。
-            aspect_ratio (string): 宽高比例，例如 1:1、3:4、9:16、16:9。
+            aspect_ratio (string): [已弃用] 宽高比例，例如 1:1、3:4、9:16、16:9；OpenAI 标准通道会按比例换算为 size，请优先直接传 size。
             size (string): 分辨率或尺寸参数，例如 1024x1024。
             extra_params (string): 其他模型参数透传，格式为 --key value，可同时传多个。
             return_result (bool): 仅供其他插件显式调用时使用。为 true 时不自动下发图片，而是返回 JSON 图片结果。

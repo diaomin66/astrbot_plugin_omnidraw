@@ -365,6 +365,86 @@ def filter_provider_api_kwargs(kwargs: Dict[str, Any], provider_id: str = "") ->
     return filtered
 
 
+def aspect_ratio_to_size(value: Any, *, long_side: int = 1024) -> str:
+    """Convert an aspect ratio like "16:9" to a "WxH" size string.
+
+    Long side is 1024 and both sides are rounded to multiples of 16,
+    as the issue reporter suggested. Returns "" for unparseable input.
+    """
+    text = str(value or "").strip().replace("/", ":")
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) != 2:
+            return ""
+        try:
+            width_ratio = float(parts[0].strip())
+            height_ratio = float(parts[1].strip())
+        except ValueError:
+            return ""
+    else:
+        try:
+            ratio = float(text)
+        except ValueError:
+            return ""
+        width_ratio, height_ratio = ratio, 1.0
+    if width_ratio <= 0 or height_ratio <= 0:
+        return ""
+
+    def _round16(number: float) -> int:
+        return max(16, int(round(number / 16.0)) * 16)
+
+    if width_ratio >= height_ratio:
+        return f"{long_side}x{_round16(long_side * height_ratio / width_ratio)}"
+    return f"{_round16(long_side * width_ratio / height_ratio)}x{long_side}"
+
+
+def convert_openai_image_size_kwargs(
+    kwargs: Dict[str, Any], provider_id: str = ""
+) -> Dict[str, Any]:
+    """Drop aspect_ratio for the OpenAI image channel; convert it to size.
+
+    An explicit, non-"auto" size wins and aspect_ratio is dropped.
+    An invalid ratio is dropped (never sent to OpenAI).
+    """
+    converted = dict(kwargs)
+    ratio = None
+    found = False
+    for key in list(converted):
+        if str(key).casefold() == "aspect_ratio":
+            # Pop every case variant: a leftover "Aspect_Ratio" key would
+            # still be sent to OpenAI and rejected the same way.
+            value = converted.pop(key)
+            if not found:
+                ratio = value
+                found = True
+    if not found:
+        return converted
+    # Normalize any case variant of "size" to the canonical key, so a
+    # stray "Size" is not sent to OpenAI alongside the converted value.
+    size = ""
+    size_found = False
+    for key in list(converted):
+        if str(key).casefold() == "size":
+            value = converted.pop(key)
+            if not size_found:
+                size = value
+                size_found = True
+    prefix = f"[{provider_id}] " if provider_id else ""
+    if str(size or "").strip() and str(size).strip().lower() != "auto":
+        logger.warning(prefix + f"已忽略 aspect_ratio，已显式指定 size: {size}")
+        converted["size"] = size
+        return converted
+    size_text = aspect_ratio_to_size(ratio)
+    if not size_text:
+        logger.warning(prefix + f"aspect_ratio 无效，已忽略: {ratio}")
+        if size_found:
+            converted["size"] = size
+        return converted
+    converted["size"] = size_text
+    logger.info(prefix + f"aspect_ratio {ratio} 已换算为 size {size_text}")
+    return converted
+
+
 SENSITIVE_LOG_KEY_MARKERS = ("key", "token", "secret", "authorization", "password")
 IMAGE_LOG_KEY_MARKERS = ("image", "b64", "base64", "binary_data")
 PROMPT_LOG_KEY_MARKERS = ("prompt", "input_text")
