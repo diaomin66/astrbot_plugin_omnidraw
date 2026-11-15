@@ -23,6 +23,31 @@ DEFAULT_SELFIE_ERROR_MESSAGE = "💥 自拍生成失败: {error}"
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-image"
 
+# OpenAI 标准图像/对话接口不接受 aspect_ratio（会返回 Unknown parameter），
+# 只有 Gemini 官方与自定义端点支持该参数。当调用方只给了 aspect_ratio 时，
+# 按下表静默换算成 size；表中数值均为 16 的整数倍，满足 OpenAI 对 size 的要求。
+ASPECT_RATIO_TO_SIZE = {
+    "1:1": "1024x1024",
+    "4:3": "1536x1152",
+    "3:4": "1152x1536",
+    "3:2": "1536x1024",
+    "2:3": "1024x1536",
+    "16:9": "1536x864",
+    "9:16": "864x1536",
+    "21:9": "1680x720",
+    "9:21": "720x1680",
+}
+
+
+def aspect_ratio_to_size(aspect_ratio: str) -> str:
+    """把 aspect_ratio（如 ``16:9``）换算成 size（如 ``1536x864``）。
+
+    兼容全角冒号；无法识别的比例返回空字符串，调用方应保持原参数不变。
+    """
+    key = str(aspect_ratio or "").strip().replace("：", ":")
+    return ASPECT_RATIO_TO_SIZE.get(key, "")
+
+
 class APIType:
     """接口类型枚举"""
     OPENAI_IMAGE = "openai_image"
