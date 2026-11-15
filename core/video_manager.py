@@ -273,7 +273,7 @@ class VideoManager:
                     continue
 
                 consecutive_errors = 0
-                status = str(data.get("status", data.get("task_status", ""))).upper()
+                status = self._extract_task_status(data)
                 logger.info(f"⏳ [视频轮询] Task ID: {task_id}, 状态: {status} (尝试 {attempt})")
 
                 if status in {"SUCCESS", "SUCCEEDED", "COMPLETED"}:
@@ -300,17 +300,73 @@ class VideoManager:
 
         raise VideoTaskError(f"视频生成轮询超时，已达到设置的 {provider.timeout} 秒最大等待时间。")
 
+    def _extract_task_status(self, data: Dict[str, Any]) -> str:
+        """Read the polling status the way docs/async-video-tasks.md promises.
+
+        Lookup order (issue #72): the ``data`` object (or the first item of a
+        ``data`` list) first, using ``status`` / ``task_status`` / ``state``;
+        the top level is only a fallback. Top-level envelope values such as
+        ``ok`` / ``true`` / ``false`` describe the HTTP envelope rather than
+        the task, so they are skipped instead of being read as a status.
+        """
+        sources: List[Dict[str, Any]] = []
+        data_field = data.get("data")
+        if isinstance(data_field, dict):
+            sources.append(data_field)
+        elif isinstance(data_field, list) and data_field:
+            first_item = data_field[0]
+            if isinstance(first_item, dict):
+                sources.append(first_item)
+        sources.append(data)
+        for source in sources:
+            for key in ("status", "task_status", "state"):
+                raw = source.get(key)
+                if raw is None or isinstance(raw, (dict, list)):
+                    continue
+                status = str(raw).strip().upper()
+                if not status:
+                    continue
+                if source is data and status in {"OK", "TRUE", "FALSE"}:
+                    continue
+                return status
+        return ""
+
     def _extract_video_url(self, data: Dict[str, Any]) -> str:
-        video_url = data.get("video_url", data.get("url", data.get("output", "")))
+        video_url = data.get(
+            "video_url",
+            data.get("url", data.get("output", data.get("result_url", ""))),
+        )
         if video_url:
             return self._extract_url(str(video_url))
         data_field = data.get("data")
         if isinstance(data_field, list) and data_field:
             item = data_field[0]
             if isinstance(item, dict):
-                return self._extract_url(str(item.get("url", item.get("output", item.get("video_url", "")))))
+                return self._extract_url(
+                    str(
+                        item.get(
+                            "url",
+                            item.get(
+                                "output",
+                                item.get("video_url", item.get("result_url", "")),
+                            ),
+                        )
+                    )
+                )
         if isinstance(data_field, dict):
-            return self._extract_url(str(data_field.get("output", data_field.get("url", data_field.get("video_url", "")))))
+            return self._extract_url(
+                str(
+                    data_field.get(
+                        "output",
+                        data_field.get(
+                            "url",
+                            data_field.get(
+                                "video_url", data_field.get("result_url", "")
+                            ),
+                        ),
+                    )
+                )
+            )
         return ""
 
     async def _fetch_video_from_api(
